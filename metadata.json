@@ -1,6 +1,6 @@
 {
   "name": "MathGraph VBA Designer",
-  "description": "Designed to generate professional mathematical graphs and export compliant VBA code for Microsoft Word shapes.",
+  "description": "Professional mathematical graph designer for DSE-style materials, exporting native VBA code for editable Microsoft Word shapes.",
   "requestFramePermissions": [],
   "majorCapabilities": []
 }
