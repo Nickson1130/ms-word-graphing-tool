@@ -416,20 +416,18 @@ export default function MathGraphDesigner() {
         } catch {}
 
         // Generic X and Y Intercepts from segments
-        // Suppress ticks when the equation IS an axis or pure vertical/horizontal line
-        const exprNorm = originalExpr.replace(/\s/g, '');
-        const isYAxis = exprNorm === 'y=0' || exprNorm === 'y';
-        const isXAxis = exprNorm === 'x=0' || exprNorm === 'x';
-        const isVertical = /^x=/.test(exprNorm); // x=anything → no y-intercept ticks
-        const rhsPart = parts[1]?.trim() || '';
-        const isHorizontal = parts[0].trim() === 'y' && rhsPart !== '' && !rhsPart.includes('x'); // y=constant
+        // Geometrically detect if this segment lies entirely on an axis —
+        // this catches x^2=0, y^3=0, x*y=0 branches, etc. without string matching.
+        const segLiesOnXAxis = segment.every(p => Math.abs(p.y) < 0.01);
+        const segLiesOnYAxis = segment.every(p => Math.abs(p.x) < 0.01);
+        if (segLiesOnXAxis || segLiesOnYAxis) continue; // skip — infinite ticks would appear
 
         for (let i = 0; i < segment.length - 1; i++) {
           const p1 = segment[i];
           const p2 = segment[i+1];
 
-          // X-Intercept (y crosses 0) — skip if equation is the x-axis or a horizontal line
-          if (!isYAxis && !isHorizontal && settings.showXIntercepts && ((p1.y >= 0 && p2.y <= 0) || (p1.y <= 0 && p2.y >= 0))) {
+          // X-Intercept (y crosses 0)
+          if (settings.showXIntercepts && ((p1.y >= 0 && p2.y <= 0) || (p1.y <= 0 && p2.y >= 0))) {
             let xInt;
             const dy = p1.y - p2.y;
             if (Math.abs(dy) < 0.000001) {
@@ -450,8 +448,8 @@ export default function MathGraphDesigner() {
             }
           }
 
-          // Y-Intercept (x crosses 0) — skip if equation is the y-axis or a vertical line
-          if (!isXAxis && !isVertical && settings.showYIntercepts && ((p1.x >= 0 && p2.x <= 0) || (p1.x <= 0 && p2.x >= 0))) {
+          // Y-Intercept (x crosses 0)
+          if (settings.showYIntercepts && ((p1.x >= 0 && p2.x <= 0) || (p1.x <= 0 && p2.x >= 0))) {
             let yInt;
             const dx = p1.x - p2.x;
             if (Math.abs(dx) < 0.000001) {
