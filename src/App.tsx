@@ -385,6 +385,28 @@ export default function MathGraphDesigner() {
             const gridX = 400;
             const gridY = 400;
             const compiled = math.parse(`(${lhs}) - (${rhs})`).compile();
+
+            // Sanity check: reject degenerate equations (e.g. y-y=0, 0=0, x-x=1)
+            // by sampling F at a few points. If F is constant across all samples,
+            // the equation is either always true (infinite solutions → would freeze
+            // the browser) or always false (no solutions).
+            let degenerate = true;
+            let firstVal: number | null = null;
+            const probeXs = [iXMin + (iXMax - iXMin) * 0.17, iXMin + (iXMax - iXMin) * 0.53, iXMin + (iXMax - iXMin) * 0.89];
+            const probeYs = [iYMin + (iYMax - iYMin) * 0.23, iYMin + (iYMax - iYMin) * 0.61, iYMin + (iYMax - iYMin) * 0.97];
+            for (const px of probeXs) {
+              for (const py of probeYs) {
+                try {
+                  const v = compiled.evaluate({ ...mathScope, x: px, y: py });
+                  if (typeof v !== 'number' || !isFinite(v)) continue;
+                  if (firstVal === null) { firstVal = v; continue; }
+                  if (Math.abs(v - firstVal) > 1e-9) { degenerate = false; break; }
+                } catch {}
+              }
+              if (!degenerate) break;
+            }
+            if (degenerate) return; // skip this interval — no valid curve to draw
+
             const dx = (iXMax - iXMin) / Math.max(gridX, 1);
             const dy = (iYMax - iYMin) / Math.max(gridY, 1);
             const implicitSegments: { x: number; y: number }[][] = [];
