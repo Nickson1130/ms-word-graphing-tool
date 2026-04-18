@@ -301,8 +301,8 @@ export default function MathGraphDesigner() {
             const iYMax = interval.useCustomRange ? (parseFloat(interval.yMax) || 0) : nYMax;
 
             // Use a high-resolution grid for smooth implicit plotting
-            const gridX = 300;
-            const gridY = 300;
+            const gridX = 400;
+            const gridY = 400;
             const dx = (iXMax - iXMin) / Math.max(gridX, 1);
             const dy = (iYMax - iYMin) / Math.max(gridY, 1);
             const implicitSegments: { x: number; y: number }[][] = [];
@@ -416,7 +416,7 @@ export default function MathGraphDesigner() {
         } catch {}
 
         // Generic X and Y Intercepts from segments
-        // Skip tick detection entirely if the equation itself is x=0 or y=0
+        // Skip tick detection if equation IS the axis itself
         const isXEquals0 = originalExpr.replace(/\s/g, '') === 'x=0';
         const isYEquals0 = originalExpr.replace(/\s/g, '') === 'y=0';
 
@@ -1378,12 +1378,10 @@ End Sub
                   let d = '';
                   if (pts.length === 0) {
                     d = '';
-                  } else if (pts.length === 1) {
-                    d = `M ${pts[0].x} ${pts[0].y}`;
-                  } else if (pts.length === 2) {
-                    d = `M ${pts[0].x} ${pts[0].y} L ${pts[1].x} ${pts[1].y}`;
+                  } else if (pts.length <= 2) {
+                    d = pts.map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.x} ${p.y}`).join(' ');
                   } else {
-                    // Catmull-Rom to cubic bezier for smooth curves
+                    // Catmull-Rom → cubic bezier for smooth curves
                     d = `M ${pts[0].x} ${pts[0].y}`;
                     for (let i = 0; i < pts.length - 1; i++) {
                       const p0 = pts[Math.max(i - 1, 0)];
@@ -1398,19 +1396,20 @@ End Sub
                     }
                   }
                   return (
-                  <path 
-                    key={`${curve.id}-${sIdx}`}
-                    d={d}
-                    stroke={curve.color} 
-                    strokeWidth={curve.lineWidth * 1.5}
-                    strokeLinejoin="round"
-                    strokeLinecap="round"
-                    strokeDasharray={DASH_STYLES.find(s => s.value === curve.dashStyle)?.dash}
-                    fill="none"
-                    className="animate-in fade-in duration-500"
-                  />
+                    <path
+                      key={`${curve.id}-${sIdx}`}
+                      d={d}
+                      stroke={curve.color}
+                      strokeWidth={curve.lineWidth * 1.5}
+                      strokeLinejoin="round"
+                      strokeLinecap="round"
+                      strokeDasharray={DASH_STYLES.find(s => s.value === curve.dashStyle)?.dash}
+                      fill="none"
+                      className="animate-in fade-in duration-500"
+                    />
                   );
-                })}
+                })
+                }
               </g>
             ))}
 
