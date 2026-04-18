@@ -232,6 +232,59 @@ export default function MathGraphDesigner() {
     ln: (x: number) => Math.log(x),
   }), []);
 
+  // --- Helper: try to rearrange f(x,y)=g(x,y) into y=h(x) when y appears linearly ---
+  // Returns a compiled expression for h(x), or null if not possible.
+  const tryResolveForY = (lhs: string, rhs: string): ReturnType<typeof math.parse>['compile'] | null => {
+    try {
+      // Build F(x,y) = LHS - RHS, then evaluate at two different y values
+      // to extract the linear coefficient of y symbolically via finite differences.
+      // If F is linear in y: F(x,y) = A(x)*y + B(x), so:
+      //   A(x) = F(x,1) - F(x,0)
+      //   B(x) = F(x,0)
+      //   y = -B(x)/A(x)
+      // We verify linearity by checking F(x,2) == 2*A(x) + B(x) at a test x.
+      const compiled = math.parse(`(${lhs}) - (${rhs})`).compile();
+
+      // Test at x=1 to check linearity of y
+      const f0 = compiled.evaluate({ x: 1, y: 0 });
+      const f1 = compiled.evaluate({ x: 1, y: 1 });
+      const f2 = compiled.evaluate({ x: 1, y: 2 });
+
+      if (!isFinite(f0) || !isFinite(f1) || !isFinite(f2)) return null;
+
+      const A_test = f1 - f0; // coefficient of y at x=1
+      const B_test = f0;      // constant term at x=1
+
+      // Verify linearity: F(x,2) should equal 2*A + B
+      if (Math.abs(f2 - (2 * A_test + B_test)) > 1e-9) return null;
+      // Verify y actually appears (A != 0)
+      if (Math.abs(A_test) < 1e-9) return null;
+
+      // Also verify at x=2 to guard against accidental linearity at x=1
+      const g0 = compiled.evaluate({ x: 2, y: 0 });
+      const g1 = compiled.evaluate({ x: 2, y: 1 });
+      const g2 = compiled.evaluate({ x: 2, y: 2 });
+      if (!isFinite(g0) || !isFinite(g1) || !isFinite(g2)) return null;
+      const A_test2 = g1 - g0;
+      if (Math.abs(g2 - (2 * A_test2 + g0)) > 1e-9) return null;
+      if (Math.abs(A_test2) < 1e-9) return null;
+
+      // y = -F(x,0) / (F(x,1) - F(x,0))
+      // Build compiled evaluator using this numeric approach at runtime
+      const f0compiled = math.parse(`(${lhs}) - (${rhs})`).compile();
+      return {
+        evaluate: (scope: { x: number }) => {
+          const b = f0compiled.evaluate({ ...scope, y: 0 });
+          const a = f0compiled.evaluate({ ...scope, y: 1 }) - b;
+          if (Math.abs(a) < 1e-12) return NaN;
+          return -b / a;
+        }
+      } as ReturnType<typeof math.parse>['compile'];
+    } catch {
+      return null;
+    }
+  };
+
   // Curve sampling for multiple equations
   const allCurvePoints = useMemo(() => {
     return settings.equations.map(eq => {
@@ -289,10 +342,42 @@ export default function MathGraphDesigner() {
           });
         } else {
           // Relation Path: f(x, y) = 0
-          // Convert to LHS - RHS
           const lhs = parts[0] || '0';
-          const rhs = parts[1] || '0';
-          const compiled = math.parse(`(${lhs}) - (${rhs})`).compile();
+          const rhs = parts.length >= 2 ? (parts[1] || '0') : '0';
+
+          // Optimisation: if y appears linearly, rearrange to y=h(x) and use fast path
+          const resolvedForY = tryResolveForY(lhs, rhs);
+          if (resolvedForY) {
+            eq.intervals.forEach(interval => {
+              const iXMin = interval.useCustomDomain ? (parseFloat(interval.xMin) || 0) : nXMin;
+              const iXMax = interval.useCustomDomain ? (parseFloat(interval.xMax) || 0) : nXMax;
+              const iYMin = interval.useCustomRange ? (parseFloat(interval.yMin) || 0) : nYMin;
+              const iYMax = interval.useCustomRange ? (parseFloat(interval.yMax) || 0) : nYMax;
+
+              const points: { x: number; y: number }[] = [];
+              const samples = Math.max(2, Math.ceil((iXMax - iXMin) / 0.01) + 1);
+              const step = (iXMax - iXMin) / (samples - 1);
+
+              for (let i = 0; i < samples; i++) {
+                const x = iXMin + i * step;
+                try {
+                  const y = resolvedForY.evaluate({ ...mathScope, x });
+                  if (typeof y === 'number' && isFinite(y)) {
+                    if (y >= (iYMin - 0.0001) && y <= (iYMax + 0.0001)) {
+                      points.push({ x, y });
+                    } else if (points.length > 0) {
+                      allSegments.push([...points]);
+                      points.length = 0;
+                    }
+                  } else if (points.length > 0) {
+                    allSegments.push([...points]);
+                    points.length = 0;
+                  }
+                } catch {}
+              }
+              if (points.length > 0) allSegments.push([...points]);
+            });
+          } else {
           
           eq.intervals.forEach(interval => {
             const iXMin = interval.useCustomDomain ? (parseFloat(interval.xMin) || 0) : nXMin;
@@ -303,6 +388,7 @@ export default function MathGraphDesigner() {
             // Use a high-resolution grid for smooth implicit plotting
             const gridX = 400;
             const gridY = 400;
+            const compiled = math.parse(`(${lhs}) - (${rhs})`).compile();
             const dx = (iXMax - iXMin) / Math.max(gridX, 1);
             const dy = (iYMax - iYMin) / Math.max(gridY, 1);
             const implicitSegments: { x: number; y: number }[][] = [];
@@ -354,6 +440,7 @@ export default function MathGraphDesigner() {
             // Merge fragmented segments into continuous paths
             allSegments.push(...mergeSegments(implicitSegments, Math.max(dx, dy) * 1.5));
           });
+          } // end else (marching squares)
         }
 
         return { 
@@ -399,7 +486,7 @@ export default function MathGraphDesigner() {
             const y0 = compiled.evaluate({ ...mathScope, x: 0 });
             if (isFinite(Number(y0))) {
               // Check if x=0 is in this segment
-              const xInRange = segment.some(p => Math.abs(p.x) < 0.01 * 2);
+              const xInRange = segment.some(p => Math.abs(p.x) < 0.02);
               if (xInRange && Math.abs(Number(y0)) > 0.001) {
                  allIntercepts.push({ 
                    id: `y-int-${cIdx}-${sIdx}`, 
@@ -417,13 +504,8 @@ export default function MathGraphDesigner() {
 
         // Generic X and Y Intercepts from segments
         // Geometrically detect if segment lies entirely on an axis.
-        // Use a generous threshold relative to the grid cell size to catch
-        // x^2=0, x^3=0, x^2, x^3 etc. whose solutions ARE the axis.
-        const axisThreshold = Math.max(
-          (nXMax - nXMin) / 200,
-          (nYMax - nYMin) / 200,
-          0.05
-        );
+        // Dynamic threshold catches x^2=0, x^3=0, x^2, x^3 etc.
+        const axisThreshold = Math.max((nXMax - nXMin) / 200, (nYMax - nYMin) / 200, 0.05);
         const segLiesOnXAxis = segment.every(p => Math.abs(p.y) < axisThreshold);
         const segLiesOnYAxis = segment.every(p => Math.abs(p.x) < axisThreshold);
 
