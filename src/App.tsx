@@ -416,12 +416,12 @@ export default function MathGraphDesigner() {
         } catch {}
 
         // Generic X and Y Intercepts from segments
-        // Geometrically detect if this segment lies entirely on an axis —
-        // this catches x^2=0, y^3=0, x*y=0 branches, etc. without string matching.
+        // Geometrically detect if segment lies entirely on an axis (e.g. x^2=0, y^3=0)
+        // to avoid generating infinite ticks along the axis line.
         const segLiesOnXAxis = segment.every(p => Math.abs(p.y) < 0.01);
         const segLiesOnYAxis = segment.every(p => Math.abs(p.x) < 0.01);
-        if (segLiesOnXAxis || segLiesOnYAxis) continue; // skip — infinite ticks would appear
 
+        if (!segLiesOnXAxis && !segLiesOnYAxis) {
         for (let i = 0; i < segment.length - 1; i++) {
           const p1 = segment[i];
           const p2 = segment[i+1];
@@ -470,6 +470,7 @@ export default function MathGraphDesigner() {
             }
           }
         }
+        } // end if (!segLiesOnXAxis && !segLiesOnYAxis)
       });
     });
 
