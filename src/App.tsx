@@ -233,56 +233,48 @@ export default function MathGraphDesigner() {
   }), []);
 
   // --- Helper: try to rearrange f(x,y)=g(x,y) into y=h(x) when y appears linearly ---
-  // Returns a compiled expression for h(x), or null if not possible.
-  const tryResolveForY = (lhs: string, rhs: string): ReturnType<typeof math.parse>['compile'] | null => {
+  // Returns an evaluator { evaluate: ({x}) => y } or null if not linear in y.
+  const tryResolveForY = (lhs: string, rhs: string): { evaluate: (scope: { x: number }) => number } | null => {
+    let compiled: ReturnType<ReturnType<typeof math.parse>['compile']> | any;
     try {
-      // Build F(x,y) = LHS - RHS, then evaluate at two different y values
-      // to extract the linear coefficient of y symbolically via finite differences.
-      // If F is linear in y: F(x,y) = A(x)*y + B(x), so:
-      //   A(x) = F(x,1) - F(x,0)
-      //   B(x) = F(x,0)
-      //   y = -B(x)/A(x)
-      // We verify linearity by checking F(x,2) == 2*A(x) + B(x) at a test x.
-      const compiled = math.parse(`(${lhs}) - (${rhs})`).compile();
-
-      // Test at x=1 to check linearity of y
-      const f0 = compiled.evaluate({ x: 1, y: 0 });
-      const f1 = compiled.evaluate({ x: 1, y: 1 });
-      const f2 = compiled.evaluate({ x: 1, y: 2 });
-
-      if (!isFinite(f0) || !isFinite(f1) || !isFinite(f2)) return null;
-
-      const A_test = f1 - f0; // coefficient of y at x=1
-      const B_test = f0;      // constant term at x=1
-
-      // Verify linearity: F(x,2) should equal 2*A + B
-      if (Math.abs(f2 - (2 * A_test + B_test)) > 1e-9) return null;
-      // Verify y actually appears (A != 0)
-      if (Math.abs(A_test) < 1e-9) return null;
-
-      // Also verify at x=2 to guard against accidental linearity at x=1
-      const g0 = compiled.evaluate({ x: 2, y: 0 });
-      const g1 = compiled.evaluate({ x: 2, y: 1 });
-      const g2 = compiled.evaluate({ x: 2, y: 2 });
-      if (!isFinite(g0) || !isFinite(g1) || !isFinite(g2)) return null;
-      const A_test2 = g1 - g0;
-      if (Math.abs(g2 - (2 * A_test2 + g0)) > 1e-9) return null;
-      if (Math.abs(A_test2) < 1e-9) return null;
-
-      // y = -F(x,0) / (F(x,1) - F(x,0))
-      // Build compiled evaluator using this numeric approach at runtime
-      const f0compiled = math.parse(`(${lhs}) - (${rhs})`).compile();
-      return {
-        evaluate: (scope: { x: number }) => {
-          const b = f0compiled.evaluate({ ...scope, y: 0 });
-          const a = f0compiled.evaluate({ ...scope, y: 1 }) - b;
-          if (Math.abs(a) < 1e-12) return NaN;
-          return -b / a;
-        }
-      } as ReturnType<typeof math.parse>['compile'];
+      compiled = math.parse(`(${lhs}) - (${rhs})`).compile();
     } catch {
       return null;
     }
+
+    // F(x,y) = A(x)*y + B(x) if linear in y. Test linearity at several x values
+    // by checking F(x, y2) - F(x, y1) is proportional to (y2 - y1) and that
+    // the second difference in y is zero (i.e. y^2 term is absent).
+    const testXs = [-1.3, 0.7, 1.5, 2.4];
+    for (const tx of testXs) {
+      try {
+        const f0 = compiled.evaluate({ ...mathScope, x: tx, y: 0 });
+        const f1 = compiled.evaluate({ ...mathScope, x: tx, y: 1 });
+        const f2 = compiled.evaluate({ ...mathScope, x: tx, y: 2 });
+        if (!isFinite(f0) || !isFinite(f1) || !isFinite(f2)) return null;
+
+        const a = f1 - f0;                  // coefficient of y
+        const predicted_f2 = 2 * a + f0;    // what F(x,2) should be if linear
+        if (Math.abs(f2 - predicted_f2) > 1e-7) return null; // nonlinear in y
+        if (Math.abs(a) < 1e-9) return null; // y doesn't appear (or cancels)
+      } catch {
+        return null; // couldn't evaluate at this test point (e.g. div by zero)
+      }
+    }
+
+    // Confirmed linear-in-y. Build runtime evaluator: y = -B(x)/A(x)
+    return {
+      evaluate: (scope: { x: number }) => {
+        try {
+          const b = compiled.evaluate({ ...mathScope, ...scope, y: 0 });
+          const a = compiled.evaluate({ ...mathScope, ...scope, y: 1 }) - b;
+          if (Math.abs(a) < 1e-12) return NaN;
+          return -b / a;
+        } catch {
+          return NaN;
+        }
+      }
+    };
   };
 
   // Curve sampling for multiple equations
@@ -361,7 +353,7 @@ export default function MathGraphDesigner() {
               for (let i = 0; i < samples; i++) {
                 const x = iXMin + i * step;
                 try {
-                  const y = resolvedForY.evaluate({ ...mathScope, x });
+                  const y = resolvedForY.evaluate({ x });
                   if (typeof y === 'number' && isFinite(y)) {
                     if (y >= (iYMin - 0.0001) && y <= (iYMax + 0.0001)) {
                       points.push({ x, y });
