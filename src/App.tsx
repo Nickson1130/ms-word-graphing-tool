@@ -126,6 +126,8 @@ interface GraphSettings {
   customYTicks: string; // comma separated
   arrowStyle: string; // msoArrowheadStyle value
   tickWidth: number;
+  axisLabelFontSize: number;   // font size for x, y, O labels
+  customLabelFontSize: number; // font size for custom labels
 }
 
 // --- Constants ---
@@ -189,6 +191,8 @@ const DEFAULT_SETTINGS: GraphSettings = {
   customYTicks: '',
   arrowStyle: 'msoArrowheadOpen',
   tickWidth: 0.75,
+  axisLabelFontSize: 12,
+  customLabelFontSize: 10,
 };
 
 export default function MathGraphDesigner() {
@@ -714,7 +718,7 @@ Sub DrawGraph()
     lbl.Fill.Visible = 0: lbl.Line.Visible = 0
     lbl.TextFrame.MarginLeft = 0: lbl.TextFrame.MarginRight = 0: lbl.TextFrame.MarginTop = 0: lbl.TextFrame.MarginBottom = 0
     lbl.TextFrame.WordWrap = 0: lbl.TextFrame.TextRange.Text = "${l.text}"
-    lbl.TextFrame.TextRange.Font.Name = "Times New Roman": lbl.TextFrame.TextRange.Font.Size = 10
+    lbl.TextFrame.TextRange.Font.Name = "Times New Roman": lbl.TextFrame.TextRange.Font.Size = ${settings.customLabelFontSize}
     lbl.TextFrame.TextRange.Font.Italic = True
     shpCount = shpCount + 1: ReDim Preserve shpArray(1 To shpCount): shpArray(shpCount) = lbl.Name`;
     }).join('')}
@@ -730,7 +734,7 @@ Sub DrawGraph()
         lbl.TextFrame.TextRange.Text = "O"
         lbl.TextFrame.TextRange.Font.Name = "Times New Roman"
         lbl.TextFrame.TextRange.Font.Italic = True
-        lbl.TextFrame.TextRange.Font.Size = 12
+        lbl.TextFrame.TextRange.Font.Size = ${settings.axisLabelFontSize}
         shpCount = shpCount + 1: ReDim Preserve shpArray(1 To shpCount): shpArray(shpCount) = lbl.Name
     End If
 
@@ -769,7 +773,7 @@ Sub DrawGraph()
         lbl.TextFrame.MarginLeft = 0: lbl.TextFrame.MarginRight = 0: lbl.TextFrame.MarginTop = 0: lbl.TextFrame.MarginBottom = 0
         lbl.TextFrame.WordWrap = 0
         lbl.TextFrame.TextRange.Text = " " & "${settings.xAxisLabel}"
-        lbl.TextFrame.TextRange.Font.Name = "Times New Roman": lbl.TextFrame.TextRange.Font.Italic = True: lbl.TextFrame.TextRange.Font.Size = 12
+        lbl.TextFrame.TextRange.Font.Name = "Times New Roman": lbl.TextFrame.TextRange.Font.Italic = True: lbl.TextFrame.TextRange.Font.Size = ${settings.axisLabelFontSize}
         lbl.TextFrame.TextRange.ParagraphFormat.Alignment = 1 ' Center
         shpCount = shpCount + 1: ReDim Preserve shpArray(1 To shpCount): shpArray(shpCount) = lbl.Name
     End If
@@ -781,7 +785,7 @@ Sub DrawGraph()
         lbl.TextFrame.MarginLeft = 0: lbl.TextFrame.MarginRight = 0: lbl.TextFrame.MarginTop = 0: lbl.TextFrame.MarginBottom = 0
         lbl.TextFrame.WordWrap = 0
         lbl.TextFrame.TextRange.Text = " " & "${settings.yAxisLabel}"
-        lbl.TextFrame.TextRange.Font.Name = "Times New Roman": lbl.TextFrame.TextRange.Font.Italic = True: lbl.TextFrame.TextRange.Font.Size = 12
+        lbl.TextFrame.TextRange.Font.Name = "Times New Roman": lbl.TextFrame.TextRange.Font.Italic = True: lbl.TextFrame.TextRange.Font.Size = ${settings.axisLabelFontSize}
         lbl.TextFrame.TextRange.ParagraphFormat.Alignment = 0 ' Left alignment to prevent italic clipping
         shpCount = shpCount + 1: ReDim Preserve shpArray(1 To shpCount): shpArray(shpCount) = lbl.Name
     End If
@@ -1123,6 +1127,30 @@ End Sub
                   type="number" step="0.05" min="0.1"
                   value={settings.tickWidth}
                   onChange={(e) => setSettings({ ...settings, tickWidth: Number(e.target.value) })}
+                  className="w-16 bg-stone-50 border border-stone-200 p-1 rounded text-xs"
+                />
+              </div>
+              <div className="flex items-center justify-between">
+                <div className="flex flex-col">
+                  <span className="text-sm text-stone-600">Axis Label Size</span>
+                  <span className="text-[10px] text-stone-400 -mt-1 italic">x, y, O</span>
+                </div>
+                <input 
+                  type="number" step="1" min="6" max="48"
+                  value={settings.axisLabelFontSize}
+                  onChange={(e) => setSettings({ ...settings, axisLabelFontSize: Number(e.target.value) })}
+                  className="w-16 bg-stone-50 border border-stone-200 p-1 rounded text-xs"
+                />
+              </div>
+              <div className="flex items-center justify-between">
+                <div className="flex flex-col">
+                  <span className="text-sm text-stone-600">Custom Label Size</span>
+                  <span className="text-[10px] text-stone-400 -mt-1 italic">point labels</span>
+                </div>
+                <input 
+                  type="number" step="1" min="6" max="48"
+                  value={settings.customLabelFontSize}
+                  onChange={(e) => setSettings({ ...settings, customLabelFontSize: Number(e.target.value) })}
                   className="w-16 bg-stone-50 border border-stone-200 p-1 rounded text-xs"
                 />
               </div>
@@ -1486,15 +1514,15 @@ End Sub
 
             {/* Axis Labels */}
             {settings.showXLabel && (
-              <text x={toPoints(settings.xMax, 0).x + 10} y={toPoints(settings.xMax, 0).y + 15} fontSize="12" className="math-label italic" style={{ fontFamily: 'Times New Roman' }}>{settings.xAxisLabel}</text>
+              <text x={toPoints(settings.xMax, 0).x + 10} y={toPoints(settings.xMax, 0).y + 15} fontSize={settings.axisLabelFontSize} className="math-label italic" style={{ fontFamily: 'Times New Roman' }}>{settings.xAxisLabel}</text>
             )}
             {settings.showYLabel && (
-              <text x={toPoints(0, settings.yMax).x - 15} y={toPoints(0, settings.yMax).y - 12} fontSize="12" className="math-label italic" style={{ fontFamily: 'Times New Roman' }}>{settings.yAxisLabel}</text>
+              <text x={toPoints(0, settings.yMax).x - 15} y={toPoints(0, settings.yMax).y - 12} fontSize={settings.axisLabelFontSize} className="math-label italic" style={{ fontFamily: 'Times New Roman' }}>{settings.yAxisLabel}</text>
             )}
 
             {/* Origin */}
             {settings.showOrigin && (
-              <text x={originX - 12} y={originY + 12} fontSize="11" className="math-label italic" style={{ fontFamily: 'Times New Roman' }}>O</text>
+              <text x={originX - 12} y={originY + 12} fontSize={settings.axisLabelFontSize} className="math-label italic" style={{ fontFamily: 'Times New Roman' }}>O</text>
             )}
 
             {/* Custom Labels & Detected Intercepts */}
@@ -1527,7 +1555,7 @@ End Sub
                     <text 
                       x={x + 4} 
                       y={y - 4} 
-                      fontSize="10" 
+                      fontSize={settings.customLabelFontSize} 
                       className="math-label" 
                       style={{ fontFamily: 'Times New Roman', fontStyle: 'italic' }}
                     >
