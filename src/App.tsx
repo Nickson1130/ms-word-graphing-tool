@@ -265,7 +265,7 @@ export default function MathGraphDesigner() {
             const iYMax = interval.useCustomRange ? (parseFloat(interval.yMax) || 0) : nYMax;
 
             const points: { x: number; y: number }[] = [];
-            const samples = Math.max(2, Math.ceil((iXMax - iXMin) / Math.max(0.0001, settings.samplingStep)) + 1);
+            const samples = Math.max(2, Math.ceil((iXMax - iXMin) / 0.01) + 1);
             const step = (iXMax - iXMin) / (samples - 1);
 
             for (let i = 0; i < samples; i++) {
@@ -373,7 +373,7 @@ export default function MathGraphDesigner() {
         };
       }
     });
-  }, [settings.equations, nXMin, nXMax, nYMin, nYMax, settings.samplingStep, mathScope]);
+  }, [settings.equations, nXMin, nXMax, nYMin, nYMax, mathScope]);
 
   // Combined Intercepts for all curves
   const intercepts = useMemo(() => {
@@ -399,7 +399,7 @@ export default function MathGraphDesigner() {
             const y0 = compiled.evaluate({ ...mathScope, x: 0 });
             if (isFinite(Number(y0))) {
               // Check if x=0 is in this segment
-              const xInRange = segment.some(p => Math.abs(p.x) < settings.samplingStep * 2);
+              const xInRange = segment.some(p => Math.abs(p.x) < 0.01 * 2);
               if (xInRange && Math.abs(Number(y0)) > 0.001) {
                  allIntercepts.push({ 
                    id: `y-int-${cIdx}-${sIdx}`, 
@@ -416,10 +416,16 @@ export default function MathGraphDesigner() {
         } catch {}
 
         // Generic X and Y Intercepts from segments
-        // Geometrically detect if segment lies entirely on an axis (e.g. x^2=0, y^3=0)
-        // to avoid generating infinite ticks along the axis line.
-        const segLiesOnXAxis = segment.every(p => Math.abs(p.y) < 0.01);
-        const segLiesOnYAxis = segment.every(p => Math.abs(p.x) < 0.01);
+        // Geometrically detect if segment lies entirely on an axis.
+        // Use a generous threshold relative to the grid cell size to catch
+        // x^2=0, x^3=0, x^2, x^3 etc. whose solutions ARE the axis.
+        const axisThreshold = Math.max(
+          (nXMax - nXMin) / 200,
+          (nYMax - nYMin) / 200,
+          0.05
+        );
+        const segLiesOnXAxis = segment.every(p => Math.abs(p.y) < axisThreshold);
+        const segLiesOnYAxis = segment.every(p => Math.abs(p.x) < axisThreshold);
 
         if (!segLiesOnXAxis && !segLiesOnYAxis) {
         for (let i = 0; i < segment.length - 1; i++) {
@@ -492,7 +498,7 @@ export default function MathGraphDesigner() {
         }
         return true;
       });
-  }, [allCurvePoints, settings.showXIntercepts, settings.showYIntercepts, settings.equations, settings.samplingStep, nXMin, nXMax, nYMin, nYMax]);
+  }, [allCurvePoints, settings.showXIntercepts, settings.showYIntercepts, settings.equations, nXMin, nXMax, nYMin, nYMax]);
 
   const xTicks = useMemo(() => {
     if (settings.customXTicks.trim()) {
@@ -1036,17 +1042,6 @@ End Sub
                   onChange={(e) => setSettings({ ...settings, unitSize: Number(e.target.value) })}
                   className="w-32 accent-stone-900"
                 />
-              </div>
-              <div className="flex items-center justify-between">
-                <span className="text-sm text-stone-600">Sampling Step</span>
-                <select 
-                  value={settings.samplingStep}
-                  onChange={(e) => setSettings({ ...settings, samplingStep: Number(e.target.value) })}
-                  className="bg-stone-50 border border-stone-200 p-1 rounded text-xs"
-                >
-                  <option value={0.01}>0.01 (Precise)</option>
-                  <option value={0.001}>0.001 (Micro)</option>
-                </select>
               </div>
               <div className="flex items-center justify-between">
                 <span className="text-sm text-stone-600">Tick Width</span>
