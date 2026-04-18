@@ -300,9 +300,9 @@ export default function MathGraphDesigner() {
             const iYMin = interval.useCustomRange ? (parseFloat(interval.yMin) || 0) : nYMin;
             const iYMax = interval.useCustomRange ? (parseFloat(interval.yMax) || 0) : nYMax;
 
-            // Use a grid for implicit plotting
-            const gridX = 80;
-            const gridY = 80;
+            // Use a high-resolution grid for smooth implicit plotting
+            const gridX = 300;
+            const gridY = 300;
             const dx = (iXMax - iXMin) / Math.max(gridX, 1);
             const dy = (iYMax - iYMin) / Math.max(gridY, 1);
             const implicitSegments: { x: number; y: number }[][] = [];
@@ -416,12 +416,16 @@ export default function MathGraphDesigner() {
         } catch {}
 
         // Generic X and Y Intercepts from segments
+        // Skip tick detection entirely if the equation itself is x=0 or y=0
+        const isXEquals0 = originalExpr.replace(/\s/g, '') === 'x=0';
+        const isYEquals0 = originalExpr.replace(/\s/g, '') === 'y=0';
+
         for (let i = 0; i < segment.length - 1; i++) {
           const p1 = segment[i];
           const p2 = segment[i+1];
 
           // X-Intercept (y crosses 0)
-          if (settings.showXIntercepts && ((p1.y >= 0 && p2.y <= 0) || (p1.y <= 0 && p2.y >= 0))) {
+          if (!isYEquals0 && settings.showXIntercepts && ((p1.y >= 0 && p2.y <= 0) || (p1.y <= 0 && p2.y >= 0))) {
             let xInt;
             const dy = p1.y - p2.y;
             if (Math.abs(dy) < 0.000001) {
@@ -443,7 +447,7 @@ export default function MathGraphDesigner() {
           }
 
           // Y-Intercept (x crosses 0)
-          if (settings.showYIntercepts && ((p1.x >= 0 && p2.x <= 0) || (p1.x <= 0 && p2.x >= 0))) {
+          if (!isXEquals0 && settings.showYIntercepts && ((p1.x >= 0 && p2.x <= 0) || (p1.x <= 0 && p2.x >= 0))) {
             let yInt;
             const dx = p1.x - p2.x;
             if (Math.abs(dx) < 0.000001) {
@@ -1369,20 +1373,44 @@ End Sub
             {/* Curves */}
             {allCurvePoints.map((curve) => (
               <g key={curve.id}>
-                {curve.segments.map((segment, sIdx) => (
+                {curve.segments.map((segment, sIdx) => {
+                  const pts = segment.map(p => toPoints(p.x, p.y));
+                  let d = '';
+                  if (pts.length === 0) {
+                    d = '';
+                  } else if (pts.length === 1) {
+                    d = `M ${pts[0].x} ${pts[0].y}`;
+                  } else if (pts.length === 2) {
+                    d = `M ${pts[0].x} ${pts[0].y} L ${pts[1].x} ${pts[1].y}`;
+                  } else {
+                    // Catmull-Rom to cubic bezier for smooth curves
+                    d = `M ${pts[0].x} ${pts[0].y}`;
+                    for (let i = 0; i < pts.length - 1; i++) {
+                      const p0 = pts[Math.max(i - 1, 0)];
+                      const p1 = pts[i];
+                      const p2 = pts[i + 1];
+                      const p3 = pts[Math.min(i + 2, pts.length - 1)];
+                      const cp1x = p1.x + (p2.x - p0.x) / 6;
+                      const cp1y = p1.y + (p2.y - p0.y) / 6;
+                      const cp2x = p2.x - (p3.x - p1.x) / 6;
+                      const cp2y = p2.y - (p3.y - p1.y) / 6;
+                      d += ` C ${cp1x} ${cp1y}, ${cp2x} ${cp2y}, ${p2.x} ${p2.y}`;
+                    }
+                  }
+                  return (
                   <path 
                     key={`${curve.id}-${sIdx}`}
-                    d={segment.reduce((acc, p, i) => {
-                      const pt = toPoints(p.x, p.y);
-                      return acc + `${i === 0 ? 'M' : 'L'} ${pt.x} ${pt.y}`;
-                    }, "")}
+                    d={d}
                     stroke={curve.color} 
-                    strokeWidth={curve.lineWidth * 1.5} // Visually boost for screen
+                    strokeWidth={curve.lineWidth * 1.5}
+                    strokeLinejoin="round"
+                    strokeLinecap="round"
                     strokeDasharray={DASH_STYLES.find(s => s.value === curve.dashStyle)?.dash}
                     fill="none"
                     className="animate-in fade-in duration-500"
                   />
-                ))}
+                  );
+                })}
               </g>
             ))}
 
