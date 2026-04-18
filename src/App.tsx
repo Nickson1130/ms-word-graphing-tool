@@ -416,16 +416,20 @@ export default function MathGraphDesigner() {
         } catch {}
 
         // Generic X and Y Intercepts from segments
-        // Skip tick detection if equation IS the axis itself
-        const isXEquals0 = originalExpr.replace(/\s/g, '') === 'x=0';
-        const isYEquals0 = originalExpr.replace(/\s/g, '') === 'y=0';
+        // Suppress ticks when the equation IS an axis or pure vertical/horizontal line
+        const exprNorm = originalExpr.replace(/\s/g, '');
+        const isYAxis = exprNorm === 'y=0' || exprNorm === 'y';
+        const isXAxis = exprNorm === 'x=0' || exprNorm === 'x';
+        const isVertical = /^x=/.test(exprNorm); // x=anything → no y-intercept ticks
+        const rhsPart = parts[1]?.trim() || '';
+        const isHorizontal = parts[0].trim() === 'y' && rhsPart !== '' && !rhsPart.includes('x'); // y=constant
 
         for (let i = 0; i < segment.length - 1; i++) {
           const p1 = segment[i];
           const p2 = segment[i+1];
 
-          // X-Intercept (y crosses 0)
-          if (!isYEquals0 && settings.showXIntercepts && ((p1.y >= 0 && p2.y <= 0) || (p1.y <= 0 && p2.y >= 0))) {
+          // X-Intercept (y crosses 0) — skip if equation is the x-axis or a horizontal line
+          if (!isYAxis && !isHorizontal && settings.showXIntercepts && ((p1.y >= 0 && p2.y <= 0) || (p1.y <= 0 && p2.y >= 0))) {
             let xInt;
             const dy = p1.y - p2.y;
             if (Math.abs(dy) < 0.000001) {
@@ -446,8 +450,8 @@ export default function MathGraphDesigner() {
             }
           }
 
-          // Y-Intercept (x crosses 0)
-          if (!isXEquals0 && settings.showYIntercepts && ((p1.x >= 0 && p2.x <= 0) || (p1.x <= 0 && p2.x >= 0))) {
+          // Y-Intercept (x crosses 0) — skip if equation is the y-axis or a vertical line
+          if (!isXAxis && !isVertical && settings.showYIntercepts && ((p1.x >= 0 && p2.x <= 0) || (p1.x <= 0 && p2.x >= 0))) {
             let yInt;
             const dx = p1.x - p2.x;
             if (Math.abs(dx) < 0.000001) {
@@ -1408,8 +1412,7 @@ End Sub
                       className="animate-in fade-in duration-500"
                     />
                   );
-                })
-                }
+                })}
               </g>
             ))}
 
