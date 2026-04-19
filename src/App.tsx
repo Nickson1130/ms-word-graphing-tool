@@ -128,6 +128,12 @@ interface GraphSettings {
   tickWidth: number;
   axisLabelFontSize: number;   // font size for x, y, O labels
   customLabelFontSize: number; // font size for custom labels
+  showGrid: boolean;
+  gridSpacingX: number;   // units between vertical gridlines
+  gridSpacingY: number;   // units between horizontal gridlines
+  gridColor: string;      // hex
+  gridOpacity: number;    // 0–1
+  gridLineWidth: number;  // line weight in points
 }
 
 // --- Constants ---
@@ -193,6 +199,12 @@ const DEFAULT_SETTINGS: GraphSettings = {
   tickWidth: 0.75,
   axisLabelFontSize: 12,
   customLabelFontSize: 10,
+  showGrid: false,
+  gridSpacingX: 1,
+  gridSpacingY: 1,
+  gridColor: '#cccccc',
+  gridOpacity: 0.5,
+  gridLineWidth: 0.25,
 };
 
 export default function MathGraphDesigner() {
@@ -616,6 +628,26 @@ export default function MathGraphDesigner() {
       .filter(y => y !== 0 && y > (nYMin + 0.01) && y < (nYMax - 0.01));
   }, [settings.customYTicks, nYMin, nYMax]);
 
+  // Gridline positions (in mathematical coordinates)
+  const gridLines = useMemo(() => {
+    if (!settings.showGrid) return { xs: [], ys: [] };
+    const sx = Math.max(0.01, settings.gridSpacingX);
+    const sy = Math.max(0.01, settings.gridSpacingY);
+    const xs: number[] = [];
+    const ys: number[] = [];
+    // anchor at 0 so gridlines pass through the origin
+    const xStart = Math.ceil(nXMin / sx) * sx;
+    for (let x = xStart; x <= nXMax + 1e-9; x += sx) {
+      // skip the axis line itself (x=0) since the axis draws it
+      if (Math.abs(x) > 1e-9) xs.push(Number(x.toFixed(6)));
+    }
+    const yStart = Math.ceil(nYMin / sy) * sy;
+    for (let y = yStart; y <= nYMax + 1e-9; y += sy) {
+      if (Math.abs(y) > 1e-9) ys.push(Number(y.toFixed(6)));
+    }
+    return { xs, ys };
+  }, [settings.showGrid, settings.gridSpacingX, settings.gridSpacingY, nXMin, nXMax, nYMin, nYMax]);
+
   // Map VBA String Constants to Integers for maximum compatibility
   const VBA_CONSTANTS: Record<string, number> = {
     'msoArrowheadNone': 1,
@@ -656,6 +688,24 @@ Sub DrawGraph()
     Dim shpArray() As Variant
     Dim shpCount As Long: shpCount = 0
     
+    ' --- 0. Draw Grid ---
+    ${settings.showGrid ? `
+    debugStep = "Drawing Grid"
+    Dim gridLine As Shape
+    ${gridLines.xs.map(gx => `
+    Set gridLine = doc.Shapes.AddLine(originX + (${gx} * unitSize), originY - (yMin * unitSize), originX + (${gx} * unitSize), originY - (yMax * unitSize))
+    gridLine.Line.ForeColor.RGB = ${hexToVbaRgb(settings.gridColor)}
+    gridLine.Line.Weight = ${settings.gridLineWidth}
+    gridLine.Line.Transparency = ${(1 - settings.gridOpacity).toFixed(3)}
+    shpCount = shpCount + 1: ReDim Preserve shpArray(1 To shpCount): shpArray(shpCount) = gridLine.Name`).join('')}
+    ${gridLines.ys.map(gy => `
+    Set gridLine = doc.Shapes.AddLine(originX + (xMin * unitSize), originY - (${gy} * unitSize), originX + (xMax * unitSize), originY - (${gy} * unitSize))
+    gridLine.Line.ForeColor.RGB = ${hexToVbaRgb(settings.gridColor)}
+    gridLine.Line.Weight = ${settings.gridLineWidth}
+    gridLine.Line.Transparency = ${(1 - settings.gridOpacity).toFixed(3)}
+    shpCount = shpCount + 1: ReDim Preserve shpArray(1 To shpCount): shpArray(shpCount) = gridLine.Name`).join('')}
+    ` : ''}
+
     ' --- 1. Draw Axes ---
     debugStep = "Drawing Axes"
     Dim xAxis As Shape, yAxis As Shape
@@ -824,7 +874,7 @@ ErrorHandler:
     MsgBox "An error occurred in Step: " & debugStep & vbCrLf & "Error Description: " & Err.Description, 16, "Graph Designer Error"
 End Sub
     `.trim();
-  }, [settings, nXMin, nXMax, nYMin, nYMax, allCurvePoints, xTicks, yTicks, intercepts]);
+  }, [settings, nXMin, nXMax, nYMin, nYMax, allCurvePoints, xTicks, yTicks, intercepts, gridLines]);
 
   const copyToClipboard = () => {
     navigator.clipboard.writeText(generatedVBA);
@@ -1321,6 +1371,87 @@ End Sub
             </div>
           </section>
 
+          {/* Grid Settings */}
+          <section className="space-y-3">
+            <div className="flex items-center justify-between border-b pb-1">
+              <label className="text-[10px] font-bold uppercase tracking-widest text-stone-400 block">Grid</label>
+              <button 
+                onClick={() => setSettings({ ...settings, showGrid: !settings.showGrid })}
+                className={cn(
+                  "w-10 h-5 rounded-full transition-colors relative",
+                  settings.showGrid ? "bg-stone-900" : "bg-stone-200"
+                )}
+              >
+                <div className={cn(
+                  "absolute top-1 w-3 h-3 bg-white rounded-full transition-all",
+                  settings.showGrid ? "left-6" : "left-1"
+                )} />
+              </button>
+            </div>
+            {settings.showGrid && (
+              <div className="space-y-2 animate-in fade-in slide-in-from-top-2">
+                <div className="grid grid-cols-2 gap-2">
+                  <div className="flex flex-col">
+                    <span className="text-[10px] text-stone-400 uppercase font-bold">X Spacing</span>
+                    <input 
+                      type="number" step="0.1" min="0.01"
+                      value={settings.gridSpacingX}
+                      onChange={(e) => setSettings({ ...settings, gridSpacingX: Number(e.target.value) })}
+                      className="bg-stone-50 border border-stone-200 p-1 rounded text-xs"
+                    />
+                  </div>
+                  <div className="flex flex-col">
+                    <span className="text-[10px] text-stone-400 uppercase font-bold">Y Spacing</span>
+                    <input 
+                      type="number" step="0.1" min="0.01"
+                      value={settings.gridSpacingY}
+                      onChange={(e) => setSettings({ ...settings, gridSpacingY: Number(e.target.value) })}
+                      className="bg-stone-50 border border-stone-200 p-1 rounded text-xs"
+                    />
+                  </div>
+                </div>
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-[10px] text-stone-400 uppercase font-bold">Color</span>
+                  <div className="flex items-center gap-2 flex-1 justify-end">
+                    <input 
+                      type="color"
+                      value={settings.gridColor}
+                      onChange={(e) => setSettings({ ...settings, gridColor: e.target.value })}
+                      className="w-8 h-6 border border-stone-200 rounded cursor-pointer"
+                    />
+                    <input 
+                      type="text"
+                      value={settings.gridColor}
+                      onChange={(e) => setSettings({ ...settings, gridColor: e.target.value })}
+                      className="w-20 bg-stone-50 border border-stone-200 p-1 rounded text-xs font-mono"
+                    />
+                  </div>
+                </div>
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-[10px] text-stone-400 uppercase font-bold">Opacity</span>
+                  <div className="flex items-center gap-2 flex-1 justify-end">
+                    <input 
+                      type="range" min="0.05" max="1" step="0.05"
+                      value={settings.gridOpacity}
+                      onChange={(e) => setSettings({ ...settings, gridOpacity: Number(e.target.value) })}
+                      className="w-24 accent-stone-900"
+                    />
+                    <span className="text-xs text-stone-500 font-mono w-8 text-right">{settings.gridOpacity.toFixed(2)}</span>
+                  </div>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-[10px] text-stone-400 uppercase font-bold">Line Width</span>
+                  <input 
+                    type="number" step="0.05" min="0.1"
+                    value={settings.gridLineWidth}
+                    onChange={(e) => setSettings({ ...settings, gridLineWidth: Number(e.target.value) })}
+                    className="w-16 bg-stone-50 border border-stone-200 p-1 rounded text-xs"
+                  />
+                </div>
+              </div>
+            )}
+          </section>
+
           <section className="space-y-3">
             <div className="flex items-center justify-between border-b pb-1">
               <label className="text-[10px] font-bold uppercase tracking-widest text-stone-400 block">Custom Labels</label>
@@ -1446,6 +1577,28 @@ End Sub
                 )}
               </marker>
             </defs>
+
+            {/* Grid */}
+            {settings.showGrid && (
+              <g opacity={settings.gridOpacity} className="animate-in fade-in duration-300">
+                {gridLines.xs.map((gx) => {
+                  const p1 = toPoints(gx, Number(settings.yMin));
+                  const p2 = toPoints(gx, Number(settings.yMax));
+                  return (
+                    <line key={`gx-${gx}`} x1={p1.x} y1={p1.y} x2={p2.x} y2={p2.y}
+                          stroke={settings.gridColor} strokeWidth={settings.gridLineWidth} />
+                  );
+                })}
+                {gridLines.ys.map((gy) => {
+                  const p1 = toPoints(Number(settings.xMin), gy);
+                  const p2 = toPoints(Number(settings.xMax), gy);
+                  return (
+                    <line key={`gy-${gy}`} x1={p1.x} y1={p1.y} x2={p2.x} y2={p2.y}
+                          stroke={settings.gridColor} strokeWidth={settings.gridLineWidth} />
+                  );
+                })}
+              </g>
+            )}
 
             {/* Axes */}
             {settings.showXAxis && (
