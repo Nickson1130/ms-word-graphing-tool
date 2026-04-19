@@ -134,6 +134,12 @@ interface GraphSettings {
   gridColor: string;      // hex
   gridOpacity: number;    // 0–1
   gridLineWidth: number;  // line weight in points
+  xScaleMode: string;     // 'linear-0.5' | 'linear-1' | 'linear-2' | 'linear-3' | 'linear-5' | 'linear-10' | 'log10' | 'log2' | 'ln' | 'custom'
+  yScaleMode: string;     // same as above
+  xScaleMultiplier: number; // free-form multiplier (used when mode is 'linear-custom')
+  yScaleMultiplier: number;
+  xScaleCustom: string;     // custom expression, e.g. 'sqrt(x)', '1/x'
+  yScaleCustom: string;
 }
 
 // --- Constants ---
@@ -153,6 +159,20 @@ const DASH_STYLES = [
   { label: 'Dash', value: 'msoLineDash', dash: '4,4' },
   { label: 'Dash Dot', value: 'msoLineDashDot', dash: '4,2,1,2' },
   { label: 'Long Dash', value: 'msoLineLongDash', dash: '8,4' },
+];
+
+const SCALE_OPTIONS = [
+  { label: 'Linear 0.5×', value: 'linear-0.5' },
+  { label: 'Linear 1×',   value: 'linear-1' },
+  { label: 'Linear 2×',   value: 'linear-2' },
+  { label: 'Linear 3×',   value: 'linear-3' },
+  { label: 'Linear 5×',   value: 'linear-5' },
+  { label: 'Linear 10×',  value: 'linear-10' },
+  { label: 'Linear custom×', value: 'linear-custom' },
+  { label: 'Log₁₀',  value: 'log10' },
+  { label: 'Log₂',   value: 'log2' },
+  { label: 'Ln',     value: 'ln' },
+  { label: 'Custom f(x)', value: 'custom' },
 ];
 
 const DEFAULT_SETTINGS: GraphSettings = {
@@ -205,6 +225,12 @@ const DEFAULT_SETTINGS: GraphSettings = {
   gridColor: '#cccccc',
   gridOpacity: 0.5,
   gridLineWidth: 0.25,
+  xScaleMode: 'linear-1',
+  yScaleMode: 'linear-1',
+  xScaleMultiplier: 1,
+  yScaleMultiplier: 1,
+  xScaleCustom: 'x',
+  yScaleCustom: 'y',
 };
 
 export default function MathGraphDesigner() {
@@ -218,18 +244,90 @@ export default function MathGraphDesigner() {
   const nYMin = parseFloat(settings.yMin) || 0;
   const nYMax = parseFloat(settings.yMax) || 0;
 
-  const canvasWidth = (nXMax - nXMin) * settings.unitSize;
-  const canvasHeight = (nYMax - nYMin) * settings.unitSize;
+  // --- Axis transform system ---
+  // Each axis has a transform t(v) that maps a data value to a "scaled value"
+  // in the same units. Canvas coordinate = originX + tx(x) * unitSize.
+  // Returns null for invalid values (e.g. log of non-positive).
+  const buildTransform = (mode: string, multiplier: number, customExpr: string, varName: 'x' | 'y'): (v: number) => number | null => {
+    if (mode.startsWith('linear-')) {
+      let k = 1;
+      if (mode === 'linear-custom') k = multiplier || 1;
+      else k = parseFloat(mode.slice(7)) || 1;
+      return (v: number) => v * k;
+    }
+    if (mode === 'log10') return (v: number) => (v > 0 ? Math.log10(v) : null);
+    if (mode === 'log2')  return (v: number) => (v > 0 ? Math.log2(v)  : null);
+    if (mode === 'ln')    return (v: number) => (v > 0 ? Math.log(v)   : null);
+    if (mode === 'custom') {
+      try {
+        const compiled = math.parse(customExpr || varName).compile();
+        return (v: number) => {
+          try {
+            const r = compiled.evaluate({ [varName]: v });
+            if (typeof r === 'number' && isFinite(r)) return r;
+            return null;
+          } catch { return null; }
+        };
+      } catch {
+        return (v: number) => v; // fallback to identity if expression is invalid
+      }
+    }
+    return (v: number) => v;
+  };
 
-  // Origin position in SVG pixels
-  const originX = -nXMin * settings.unitSize;
-  const originY = nYMax * settings.unitSize;
+  const tx = useMemo(
+    () => buildTransform(settings.xScaleMode, settings.xScaleMultiplier, settings.xScaleCustom, 'x'),
+    [settings.xScaleMode, settings.xScaleMultiplier, settings.xScaleCustom]
+  );
+  const ty = useMemo(
+    () => buildTransform(settings.yScaleMode, settings.yScaleMultiplier, settings.yScaleCustom, 'y'),
+    [settings.yScaleMode, settings.yScaleMultiplier, settings.yScaleCustom]
+  );
 
-  // Coordinate conversion
-  const toPoints = (x: number, y: number) => ({
-    x: originX + x * settings.unitSize,
-    y: originY - y * settings.unitSize,
-  });
+  // Is a log-like scale active? Used to hide origin label etc.
+  const xIsLog = ['log10', 'log2', 'ln'].includes(settings.xScaleMode);
+  const yIsLog = ['log10', 'log2', 'ln'].includes(settings.yScaleMode);
+
+  // Transformed min/max for canvas sizing & origin placement
+  const txMin = tx(nXMin); const txMax = tx(nXMax);
+  const tyMin = ty(nYMin); const tyMax = ty(nYMax);
+  const sxMin = txMin === null ? nXMin : txMin;
+  const sxMax = txMax === null ? nXMax : txMax;
+  const syMin = tyMin === null ? nYMin : tyMin;
+  const syMax = tyMax === null ? nYMax : tyMax;
+
+  // Override canvas dimensions & origin with transformed values
+  const scaledCanvasWidth  = (sxMax - sxMin) * settings.unitSize;
+  const scaledCanvasHeight = (syMax - syMin) * settings.unitSize;
+  const scaledOriginX = -sxMin * settings.unitSize;
+  const scaledOriginY =  syMax * settings.unitSize;
+
+  // Coordinate conversion — takes data coords, applies scale, returns pixel coords.
+  // Returns null for any coordinate that cannot be mapped (e.g. log of 0).
+  const toPoints = (x: number, y: number): { x: number; y: number } => {
+    const xs = tx(x); const ys = ty(y);
+    const ex = xs === null ? x : xs;
+    const ey = ys === null ? y : ys;
+    return {
+      x: scaledOriginX + ex * settings.unitSize,
+      y: scaledOriginY - ey * settings.unitSize,
+    };
+  };
+  // Version that returns null if either coordinate is invalid (for curve rendering)
+  const toPointsStrict = (x: number, y: number): { x: number; y: number } | null => {
+    const xs = tx(x); const ys = ty(y);
+    if (xs === null || ys === null) return null;
+    return {
+      x: scaledOriginX + xs * settings.unitSize,
+      y: scaledOriginY - ys * settings.unitSize,
+    };
+  };
+
+  // Aliases for backward compatibility with existing UI code
+  const canvasWidth = scaledCanvasWidth;
+  const canvasHeight = scaledCanvasHeight;
+  const originX = scaledOriginX;
+  const originY = scaledOriginY;
 
   const hexToVbaRgb = (hex: string) => {
     const r = parseInt(hex.slice(1, 3), 16) || 0;
@@ -668,8 +766,22 @@ export default function MathGraphDesigner() {
   const generatedVBA = useMemo(() => {
     const arrowInt = VBA_CONSTANTS[settings.arrowStyle] || 1;
     // Calculate Origin in JS to ensure curve points are injected as exact numbers
-    const jsOriginX = 100 + (-nXMin * settings.unitSize);
-    const jsOriginY = 100 + (nYMax * settings.unitSize);
+    const jsOriginX = 100 + scaledOriginX;
+    const jsOriginY = 100 + scaledOriginY;
+
+    // VBA coordinate helpers: precompute scaled positions in JS and inject as numeric
+    // literals into the generated VBA. This keeps the VBA simple (no log math inside
+    // Word) and ensures that all scales, including custom and log, export correctly.
+    const vbaX = (x: number): string => {
+      const xs = tx(x);
+      if (xs === null) return `${jsOriginX}`; // fallback
+      return `(${jsOriginX} + (${xs} * unitSize))`;
+    };
+    const vbaY = (y: number): string => {
+      const ys = ty(y);
+      if (ys === null) return `${jsOriginY}`;
+      return `(${jsOriginY} - (${ys} * unitSize))`;
+    };
 
     return `
 Sub DrawGraph()
@@ -693,13 +805,13 @@ Sub DrawGraph()
     debugStep = "Drawing Grid"
     Dim gridLine As Shape
     ${gridLines.xs.map(gx => `
-    Set gridLine = doc.Shapes.AddLine(originX + (${gx} * unitSize), originY - (yMin * unitSize), originX + (${gx} * unitSize), originY - (yMax * unitSize))
+    Set gridLine = doc.Shapes.AddLine(${vbaX(gx)}, ${vbaY(nYMin)}, ${vbaX(gx)}, ${vbaY(nYMax)})
     gridLine.Line.ForeColor.RGB = ${hexToVbaRgb(settings.gridColor)}
     gridLine.Line.Weight = ${settings.gridLineWidth}
     gridLine.Line.Transparency = ${(1 - settings.gridOpacity).toFixed(3)}
     shpCount = shpCount + 1: ReDim Preserve shpArray(1 To shpCount): shpArray(shpCount) = gridLine.Name`).join('')}
     ${gridLines.ys.map(gy => `
-    Set gridLine = doc.Shapes.AddLine(originX + (xMin * unitSize), originY - (${gy} * unitSize), originX + (xMax * unitSize), originY - (${gy} * unitSize))
+    Set gridLine = doc.Shapes.AddLine(${vbaX(nXMin)}, ${vbaY(gy)}, ${vbaX(nXMax)}, ${vbaY(gy)})
     gridLine.Line.ForeColor.RGB = ${hexToVbaRgb(settings.gridColor)}
     gridLine.Line.Weight = ${settings.gridLineWidth}
     gridLine.Line.Transparency = ${(1 - settings.gridOpacity).toFixed(3)}
@@ -712,14 +824,14 @@ Sub DrawGraph()
     
     If ${settings.showXAxis ? 'True' : 'False'} Then
         ' Using AddLine instead of AddConnector for maximum compatibility
-        Set xAxis = doc.Shapes.AddLine(originX + (xMin * unitSize), originY, originX + (xMax * unitSize), originY)
+        Set xAxis = doc.Shapes.AddLine(${vbaX(nXMin)}, ${vbaY(0)}, ${vbaX(nXMax)}, ${vbaY(0)})
         xAxis.Line.EndArrowheadStyle = ${arrowInt}
         xAxis.Line.Weight = 0.75: xAxis.Line.ForeColor.RGB = 0
         shpCount = shpCount + 1: ReDim Preserve shpArray(1 To shpCount): shpArray(shpCount) = xAxis.Name
     End If
 
     If ${settings.showYAxis ? 'True' : 'False'} Then
-        Set yAxis = doc.Shapes.AddLine(originX, originY - (yMin * unitSize), originX, originY - (yMax * unitSize))
+        Set yAxis = doc.Shapes.AddLine(${vbaX(0)}, ${vbaY(nYMin)}, ${vbaX(0)}, ${vbaY(nYMax)})
         yAxis.Line.EndArrowheadStyle = ${arrowInt}
         yAxis.Line.Weight = 0.75: yAxis.Line.ForeColor.RGB = 0
         shpCount = shpCount + 1: ReDim Preserve shpArray(1 To shpCount): shpArray(shpCount) = yAxis.Name
@@ -730,20 +842,20 @@ Sub DrawGraph()
         debugStep = "Drawing Ticks and Labels"
         Dim val As Variant, tick As Shape, lbl As Shape
         ' X Ticks
-        Dim xTickVals: xTickVals = Array(${xTicks.length > 0 ? xTicks.join(', ') : ''})
+        Dim xTickVals: xTickVals = Array(${xTicks.length > 0 ? xTicks.map(t => vbaX(t)).join(', ') : ''})
         If UBound(xTickVals) >= LBound(xTickVals) Then
             For Each val In xTickVals
-                Set tick = doc.Shapes.AddLine(originX + (val * unitSize), originY - 4, originX + (val * unitSize), originY + 4)
+                Set tick = doc.Shapes.AddLine(val, originY - 4, val, originY + 4)
                 tick.Line.ForeColor.RGB = 0: tick.Line.Weight = ${settings.tickWidth}
                 shpCount = shpCount + 1: ReDim Preserve shpArray(1 To shpCount): shpArray(shpCount) = tick.Name
             Next val
         End If
         
         ' Y Ticks
-        Dim yTickVals: yTickVals = Array(${yTicks.length > 0 ? yTicks.join(', ') : ''})
+        Dim yTickVals: yTickVals = Array(${yTicks.length > 0 ? yTicks.map(t => vbaY(t)).join(', ') : ''})
         If UBound(yTickVals) >= LBound(yTickVals) Then
             For Each val In yTickVals
-                Set tick = doc.Shapes.AddLine(originX - 4, originY - (val * unitSize), originX + 4, originY - (val * unitSize))
+                Set tick = doc.Shapes.AddLine(originX - 4, val, originX + 4, val)
                 tick.Line.ForeColor.RGB = RGB(0, 0, 0): tick.Line.Weight = ${settings.tickWidth}
                 shpCount = shpCount + 1: ReDim Preserve shpArray(1 To shpCount): shpArray(shpCount) = tick.Name
             Next val
@@ -756,12 +868,12 @@ Sub DrawGraph()
         ${intercepts.map(i => {
            if (i.y === 0) { // X-intercept
              return `
-        Set tick = doc.Shapes.AddLine(originX + (${i.x} * unitSize), originY - 4, originX + (${i.x} * unitSize), originY + 4)
+        Set tick = doc.Shapes.AddLine(${vbaX(i.x)}, originY - 4, ${vbaX(i.x)}, originY + 4)
         tick.Line.ForeColor.RGB = 0: tick.Line.Weight = ${settings.tickWidth}
         shpCount = shpCount + 1: ReDim Preserve shpArray(1 To shpCount): shpArray(shpCount) = tick.Name`;
            } else { // Y-intercept
              return `
-        Set tick = doc.Shapes.AddLine(originX - 4, originY - (${i.y} * unitSize), originX + 4, originY - (${i.y} * unitSize))
+        Set tick = doc.Shapes.AddLine(originX - 4, ${vbaY(i.y)}, originX + 4, ${vbaY(i.y)})
         tick.Line.ForeColor.RGB = 0: tick.Line.Weight = ${settings.tickWidth}
         shpCount = shpCount + 1: ReDim Preserve shpArray(1 To shpCount): shpArray(shpCount) = tick.Name`;
            }
@@ -774,8 +886,8 @@ Sub DrawGraph()
       return `
     ' Manual Label ${lIdx + 1}: ${l.text}
     Dim mx${lIdx}, my${lIdx}
-    mx${lIdx} = originX + (${l.x} * unitSize)
-    my${lIdx} = originY - (${l.y} * unitSize)
+    mx${lIdx} = ${vbaX(l.x)}
+    my${lIdx} = ${vbaY(l.y)}
     ${sym === 'dot' ? `
     Set tick = doc.Shapes.AddShape(9, mx${lIdx} - 1.5, my${lIdx} - 1.5, 3, 3)
     tick.Fill.ForeColor.RGB = 0: tick.Line.Visible = 0
@@ -817,11 +929,14 @@ Sub DrawGraph()
       return curve.segments.map((segment, sIdx) => {
         if (segment.length < 2) return '';
         const pointBuild = segment.map((p, pIdx) => {
-          const xPos = jsOriginX + (p.x * settings.unitSize);
-          const yPos = jsOriginY - (p.y * settings.unitSize);
+          const xScaled = tx(p.x);
+          const yScaled = ty(p.y);
+          if (xScaled === null || yScaled === null) return ''; // skip invalid
+          const xPos = jsOriginX + (xScaled * settings.unitSize);
+          const yPos = jsOriginY - (yScaled * settings.unitSize);
           if (pIdx === 0) return `Set fb = doc.Shapes.BuildFreeform(1, ${xPos}, ${yPos})`;
           return `fb.AddNodes 0, 1, ${xPos}, ${yPos}`;
-        }).join('\n    ');
+        }).filter(Boolean).join('\n    ');
         
         return `
     ' --- Curve ${idx + 1} Segment ${sIdx + 1} ---
@@ -840,7 +955,7 @@ Sub DrawGraph()
     
     If ${settings.showXLabel ? 'True' : 'False'} Then
         ' X Label: Restored to original position with additional -5 shift total
-        Set lbl = doc.Shapes.AddTextbox(1, originX + (xMax * unitSize) - 7, originY - 6, 30, 30)
+        Set lbl = doc.Shapes.AddTextbox(1, ${vbaX(nXMax)} - 7, ${vbaY(0)} - 6, 30, 30)
         lbl.Fill.Visible = 0: lbl.Line.Visible = 0
         lbl.TextFrame.MarginLeft = 0: lbl.TextFrame.MarginRight = 0: lbl.TextFrame.MarginTop = 0: lbl.TextFrame.MarginBottom = 0
         lbl.TextFrame.WordWrap = 0
@@ -852,7 +967,7 @@ Sub DrawGraph()
 
     If ${settings.showYLabel ? 'True' : 'False'} Then
         ' Y Label: Restored to original position with additional -5 shift total
-        Set lbl = doc.Shapes.AddTextbox(1, originX - 16, originY - (yMax * unitSize) - 9, 30, 30)
+        Set lbl = doc.Shapes.AddTextbox(1, ${vbaX(0)} - 16, ${vbaY(nYMax)} - 9, 30, 30)
         lbl.Fill.Visible = 0: lbl.Line.Visible = 0
         lbl.TextFrame.MarginLeft = 0: lbl.TextFrame.MarginRight = 0: lbl.TextFrame.MarginTop = 0: lbl.TextFrame.MarginBottom = 0
         lbl.TextFrame.WordWrap = 0
@@ -1225,6 +1340,87 @@ End Sub
                   onChange={(e) => setSettings({ ...settings, customLabelFontSize: Number(e.target.value) })}
                   className="w-16 bg-stone-50 border border-stone-200 p-1 rounded text-xs"
                 />
+              </div>
+
+              {/* Axis Scaling */}
+              <div className="space-y-2 pt-2 border-t">
+                <span className="text-[10px] text-stone-400 uppercase font-bold block">Axis Scaling</span>
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-xs text-stone-600 w-12">X Axis</span>
+                  <select 
+                    value={settings.xScaleMode}
+                    onChange={(e) => setSettings({ ...settings, xScaleMode: e.target.value })}
+                    className="flex-1 bg-stone-50 border border-stone-200 p-1 rounded text-xs"
+                  >
+                    {SCALE_OPTIONS.map(o => (
+                      <option key={o.value} value={o.value}>{o.label}</option>
+                    ))}
+                  </select>
+                </div>
+                {settings.xScaleMode === 'linear-custom' && (
+                  <div className="flex items-center justify-between gap-2 pl-14">
+                    <span className="text-[10px] text-stone-400 italic">multiplier</span>
+                    <input
+                      type="number" step="0.1"
+                      value={settings.xScaleMultiplier}
+                      onChange={(e) => setSettings({ ...settings, xScaleMultiplier: Number(e.target.value) })}
+                      className="w-20 bg-stone-50 border border-stone-200 p-1 rounded text-xs font-mono"
+                    />
+                  </div>
+                )}
+                {settings.xScaleMode === 'custom' && (
+                  <div className="flex items-center justify-between gap-2 pl-14">
+                    <span className="text-[10px] text-stone-400 italic">f(x) =</span>
+                    <input
+                      type="text"
+                      value={settings.xScaleCustom}
+                      placeholder="e.g. sqrt(x), 1/x"
+                      onChange={(e) => setSettings({ ...settings, xScaleCustom: e.target.value })}
+                      className="flex-1 bg-stone-50 border border-stone-200 p-1 rounded text-xs font-mono"
+                    />
+                  </div>
+                )}
+
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-xs text-stone-600 w-12">Y Axis</span>
+                  <select 
+                    value={settings.yScaleMode}
+                    onChange={(e) => setSettings({ ...settings, yScaleMode: e.target.value })}
+                    className="flex-1 bg-stone-50 border border-stone-200 p-1 rounded text-xs"
+                  >
+                    {SCALE_OPTIONS.map(o => (
+                      <option key={o.value} value={o.value}>{o.label}</option>
+                    ))}
+                  </select>
+                </div>
+                {settings.yScaleMode === 'linear-custom' && (
+                  <div className="flex items-center justify-between gap-2 pl-14">
+                    <span className="text-[10px] text-stone-400 italic">multiplier</span>
+                    <input
+                      type="number" step="0.1"
+                      value={settings.yScaleMultiplier}
+                      onChange={(e) => setSettings({ ...settings, yScaleMultiplier: Number(e.target.value) })}
+                      className="w-20 bg-stone-50 border border-stone-200 p-1 rounded text-xs font-mono"
+                    />
+                  </div>
+                )}
+                {settings.yScaleMode === 'custom' && (
+                  <div className="flex items-center justify-between gap-2 pl-14">
+                    <span className="text-[10px] text-stone-400 italic">f(y) =</span>
+                    <input
+                      type="text"
+                      value={settings.yScaleCustom}
+                      placeholder="e.g. sqrt(y), 1/y"
+                      onChange={(e) => setSettings({ ...settings, yScaleCustom: e.target.value })}
+                      className="flex-1 bg-stone-50 border border-stone-200 p-1 rounded text-xs font-mono"
+                    />
+                  </div>
+                )}
+                {(xIsLog || yIsLog) && (
+                  <p className="text-[9px] text-amber-700 bg-amber-50 border border-amber-200 p-1.5 rounded italic leading-snug">
+                    ⚠ On log scales, only positive values are plottable. The range must be &gt; 0.
+                  </p>
+                )}
               </div>
               <div className="flex items-center justify-between">
                 <span className="text-sm text-stone-600">Show Ticks</span>
