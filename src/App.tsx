@@ -140,6 +140,11 @@ interface GraphSettings {
   yScaleMultiplier: number;
   xScaleCustom: string;     // custom expression, e.g. 'sqrt(x)', '1/x'
   yScaleCustom: string;
+  axisBreakEnabled: boolean;     // compress a sub-interval of one axis
+  axisBreakAxis: 'x' | 'y';
+  axisBreakMin: string;          // interval lower bound (data coords)
+  axisBreakMax: string;          // interval upper bound (data coords)
+  axisBreakCompression: number;  // 0..1 — fraction of original length kept
 }
 
 // --- Constants ---
@@ -231,6 +236,11 @@ const DEFAULT_SETTINGS: GraphSettings = {
   yScaleMultiplier: 1,
   xScaleCustom: 'x',
   yScaleCustom: 'y',
+  axisBreakEnabled: false,
+  axisBreakAxis: 'y',
+  axisBreakMin: '-2',
+  axisBreakMax: '2',
+  axisBreakCompression: 0.2,
 };
 
 export default function MathGraphDesigner() {
@@ -275,14 +285,58 @@ export default function MathGraphDesigner() {
     return (v: number) => v;
   };
 
-  const tx = useMemo(
+  const txBase = useMemo(
     () => buildTransform(settings.xScaleMode, settings.xScaleMultiplier, settings.xScaleCustom, 'x'),
     [settings.xScaleMode, settings.xScaleMultiplier, settings.xScaleCustom]
   );
-  const ty = useMemo(
+  const tyBase = useMemo(
     () => buildTransform(settings.yScaleMode, settings.yScaleMultiplier, settings.yScaleCustom, 'y'),
     [settings.yScaleMode, settings.yScaleMultiplier, settings.yScaleCustom]
   );
+
+  // --- Axis compression band ---
+  // Piecewise-linear shrink of a sub-interval on one axis, applied in *scaled space*
+  // (after buildTransform). Lets the band coexist cleanly with linear / log / custom scales.
+  const breakNumMin = parseFloat(settings.axisBreakMin);
+  const breakNumMax = parseFloat(settings.axisBreakMax);
+  const breakC = Math.max(0, Math.min(1, settings.axisBreakCompression));
+  const breakValid = settings.axisBreakEnabled && isFinite(breakNumMin) && isFinite(breakNumMax) && breakNumMax > breakNumMin;
+  const breakActiveX = breakValid && settings.axisBreakAxis === 'x';
+  const breakActiveY = breakValid && settings.axisBreakAxis === 'y';
+  const breakMinSx = breakActiveX ? txBase(breakNumMin) : null;
+  const breakMaxSx = breakActiveX ? txBase(breakNumMax) : null;
+  const breakMinSy = breakActiveY ? tyBase(breakNumMin) : null;
+  const breakMaxSy = breakActiveY ? tyBase(breakNumMax) : null;
+  const compressionReadyX = breakActiveX && breakMinSx !== null && breakMaxSx !== null && breakMaxSx > breakMinSx;
+  const compressionReadyY = breakActiveY && breakMinSy !== null && breakMaxSy !== null && breakMaxSy > breakMinSy;
+
+  const tx = useMemo(() => {
+    if (!compressionReadyX) return txBase;
+    const a = breakMinSx as number;
+    const b = breakMaxSx as number;
+    const span = b - a;
+    return (v: number) => {
+      const s = txBase(v);
+      if (s === null) return null;
+      if (s <= a) return s;
+      if (s >= b) return a + span * breakC + (s - b);
+      return a + (s - a) * breakC;
+    };
+  }, [txBase, compressionReadyX, breakMinSx, breakMaxSx, breakC]);
+
+  const ty = useMemo(() => {
+    if (!compressionReadyY) return tyBase;
+    const a = breakMinSy as number;
+    const b = breakMaxSy as number;
+    const span = b - a;
+    return (v: number) => {
+      const s = tyBase(v);
+      if (s === null) return null;
+      if (s <= a) return s;
+      if (s >= b) return a + span * breakC + (s - b);
+      return a + (s - a) * breakC;
+    };
+  }, [tyBase, compressionReadyY, breakMinSy, breakMaxSy, breakC]);
 
   // Is a log-like scale active? Used to hide origin label etc.
   const xIsLog = ['log10', 'log2', 'ln'].includes(settings.xScaleMode);
@@ -424,7 +478,7 @@ export default function MathGraphDesigner() {
             const iYMax = interval.useCustomRange ? (parseFloat(interval.yMax) || 0) : nYMax;
 
             const points: { x: number; y: number }[] = [];
-            const samples = Math.max(2, Math.ceil((iXMax - iXMin) / 0.01) + 1);
+            const samples = Math.max(2, Math.ceil((iXMax - iXMin) / Math.max(settings.samplingStep, 0.0001)) + 1);
             const step = (iXMax - iXMin) / (samples - 1);
 
             for (let i = 0; i < samples; i++) {
@@ -461,7 +515,7 @@ export default function MathGraphDesigner() {
               const iYMax = interval.useCustomRange ? (parseFloat(interval.yMax) || 0) : nYMax;
 
               const points: { x: number; y: number }[] = [];
-              const samples = Math.max(2, Math.ceil((iXMax - iXMin) / 0.01) + 1);
+              const samples = Math.max(2, Math.ceil((iXMax - iXMin) / Math.max(settings.samplingStep, 0.0001)) + 1);
               const step = (iXMax - iXMin) / (samples - 1);
 
               for (let i = 0; i < samples; i++) {
@@ -588,7 +642,7 @@ export default function MathGraphDesigner() {
         };
       }
     });
-  }, [settings.equations, nXMin, nXMax, nYMin, nYMax, mathScope]);
+  }, [settings.equations, nXMin, nXMax, nYMin, nYMax, mathScope, settings.samplingStep]);
 
   // Combined Intercepts for all curves
   const intercepts = useMemo(() => {
@@ -710,21 +764,31 @@ export default function MathGraphDesigner() {
       });
   }, [allCurvePoints, settings.showXIntercepts, settings.showYIntercepts, settings.equations, nXMin, nXMax, nYMin, nYMax]);
 
+  // Hide labels that sit inside the compression band — they'd visually pile up.
+  const inBreakBandX = (v: number) => compressionReadyX && v > breakNumMin + 1e-6 && v < breakNumMax - 1e-6;
+  const inBreakBandY = (v: number) => compressionReadyY && v > breakNumMin + 1e-6 && v < breakNumMax - 1e-6;
+
   const xTicks = useMemo(() => {
+    let arr: number[];
     if (settings.customXTicks.trim()) {
-      return settings.customXTicks.split(',').map(s => parseFloat(s.trim())).filter(n => !isNaN(n));
+      arr = settings.customXTicks.split(',').map(s => parseFloat(s.trim())).filter(n => !isNaN(n));
+    } else {
+      arr = Array.from({ length: Math.floor(nXMax - nXMin) + 1 }, (_, i) => Math.ceil(nXMin) + i)
+        .filter(x => x !== 0 && x > (nXMin + 0.01) && x < (nXMax - 0.01));
     }
-    return Array.from({ length: Math.floor(nXMax - nXMin) + 1 }, (_, i) => Math.ceil(nXMin) + i)
-      .filter(x => x !== 0 && x > (nXMin + 0.01) && x < (nXMax - 0.01));
-  }, [settings.customXTicks, nXMin, nXMax]);
+    return arr.filter(x => !inBreakBandX(x));
+  }, [settings.customXTicks, nXMin, nXMax, compressionReadyX, breakNumMin, breakNumMax]);
 
   const yTicks = useMemo(() => {
+    let arr: number[];
     if (settings.customYTicks.trim()) {
-      return settings.customYTicks.split(',').map(s => parseFloat(s.trim())).filter(n => !isNaN(n));
+      arr = settings.customYTicks.split(',').map(s => parseFloat(s.trim())).filter(n => !isNaN(n));
+    } else {
+      arr = Array.from({ length: Math.floor(nYMax - nYMin) + 1 }, (_, i) => Math.ceil(nYMin) + i)
+        .filter(y => y !== 0 && y > (nYMin + 0.01) && y < (nYMax - 0.01));
     }
-    return Array.from({ length: Math.floor(nYMax - nYMin) + 1 }, (_, i) => Math.ceil(nYMin) + i)
-      .filter(y => y !== 0 && y > (nYMin + 0.01) && y < (nYMax - 0.01));
-  }, [settings.customYTicks, nYMin, nYMax]);
+    return arr.filter(y => !inBreakBandY(y));
+  }, [settings.customYTicks, nYMin, nYMax, compressionReadyY, breakNumMin, breakNumMax]);
 
   // Gridline positions (in mathematical coordinates)
   const gridLines = useMemo(() => {
@@ -737,14 +801,14 @@ export default function MathGraphDesigner() {
     const xStart = Math.ceil(nXMin / sx) * sx;
     for (let x = xStart; x <= nXMax + 1e-9; x += sx) {
       // skip the axis line itself (x=0) since the axis draws it
-      if (Math.abs(x) > 1e-9) xs.push(Number(x.toFixed(6)));
+      if (Math.abs(x) > 1e-9 && !inBreakBandX(x)) xs.push(Number(x.toFixed(6)));
     }
     const yStart = Math.ceil(nYMin / sy) * sy;
     for (let y = yStart; y <= nYMax + 1e-9; y += sy) {
-      if (Math.abs(y) > 1e-9) ys.push(Number(y.toFixed(6)));
+      if (Math.abs(y) > 1e-9 && !inBreakBandY(y)) ys.push(Number(y.toFixed(6)));
     }
     return { xs, ys };
-  }, [settings.showGrid, settings.gridSpacingX, settings.gridSpacingY, nXMin, nXMax, nYMin, nYMax]);
+  }, [settings.showGrid, settings.gridSpacingX, settings.gridSpacingY, nXMin, nXMax, nYMin, nYMax, compressionReadyX, compressionReadyY, breakNumMin, breakNumMax]);
 
   // Map VBA String Constants to Integers for maximum compatibility
   const VBA_CONSTANTS: Record<string, number> = {
@@ -1422,6 +1486,80 @@ End Sub
                   </p>
                 )}
               </div>
+
+              {/* Axis Compression Band */}
+              <div className="space-y-2 pt-2 border-t">
+                <div className="flex items-center justify-between">
+                  <span className="text-[10px] text-stone-400 uppercase font-bold block">Axis Compression Band</span>
+                  <button
+                    onClick={() => setSettings({ ...settings, axisBreakEnabled: !settings.axisBreakEnabled })}
+                    className={cn("w-10 h-5 rounded-full transition-colors relative", settings.axisBreakEnabled ? "bg-stone-900" : "bg-stone-200")}
+                  >
+                    <div className={cn("absolute top-1 w-3 h-3 bg-white rounded-full transition-all", settings.axisBreakEnabled ? "left-6" : "left-1")} />
+                  </button>
+                </div>
+                {settings.axisBreakEnabled && (
+                  <div className="space-y-2 animate-in fade-in slide-in-from-top-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-xs text-stone-600 w-12">Axis</span>
+                      <div className="flex bg-stone-50 border border-stone-200 rounded p-0.5 flex-1">
+                        <button
+                          onClick={() => setSettings({ ...settings, axisBreakAxis: 'x' })}
+                          className={cn("flex-1 text-[10px] py-0.5 rounded transition-all", settings.axisBreakAxis === 'x' ? "bg-stone-900 text-white" : "text-stone-500")}
+                        >X</button>
+                        <button
+                          onClick={() => setSettings({ ...settings, axisBreakAxis: 'y' })}
+                          className={cn("flex-1 text-[10px] py-0.5 rounded transition-all", settings.axisBreakAxis === 'y' ? "bg-stone-900 text-white" : "text-stone-500")}
+                        >Y</button>
+                      </div>
+                    </div>
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-xs text-stone-600 w-12">Interval</span>
+                      <input
+                        type="text" value={settings.axisBreakMin}
+                        onChange={(e) => setSettings({ ...settings, axisBreakMin: e.target.value })}
+                        className="w-full bg-stone-50 border border-stone-200 p-1 rounded text-[10px] font-mono"
+                        placeholder="min"
+                      />
+                      <span className="text-stone-300 text-[10px]">to</span>
+                      <input
+                        type="text" value={settings.axisBreakMax}
+                        onChange={(e) => setSettings({ ...settings, axisBreakMax: e.target.value })}
+                        className="w-full bg-stone-50 border border-stone-200 p-1 rounded text-[10px] font-mono"
+                        placeholder="max"
+                      />
+                    </div>
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-xs text-stone-600 w-12">Compress</span>
+                      <input
+                        type="range" min="0" max="1" step="0.05"
+                        value={settings.axisBreakCompression}
+                        onChange={(e) => setSettings({ ...settings, axisBreakCompression: Number(e.target.value) })}
+                        className="flex-1 accent-stone-900"
+                      />
+                      <span className="text-[10px] text-stone-500 font-mono w-10 text-right">{settings.axisBreakCompression.toFixed(2)}×</span>
+                    </div>
+                    <p className="text-[9px] text-stone-400 italic leading-snug">
+                      Shrinks the chosen interval by this factor (0 = fully collapsed, 1 = unchanged). Useful for compact plots with one wide gap.
+                    </p>
+                  </div>
+                )}
+              </div>
+
+              {/* Sampling Step */}
+              <div className="flex items-center justify-between pt-2 border-t">
+                <div className="flex flex-col">
+                  <span className="text-sm text-stone-600">Sampling Step</span>
+                  <span className="text-[10px] text-stone-400 -mt-1 italic">smaller = smoother &amp; slower</span>
+                </div>
+                <input
+                  type="number" step="0.001" min="0.0001"
+                  value={settings.samplingStep}
+                  onChange={(e) => setSettings({ ...settings, samplingStep: Number(e.target.value) })}
+                  className="w-20 bg-stone-50 border border-stone-200 p-1 rounded text-xs font-mono"
+                />
+              </div>
+
               <div className="flex items-center justify-between">
                 <span className="text-sm text-stone-600">Show Ticks</span>
                 <button 
@@ -1813,6 +1951,34 @@ End Sub
                 className="transition-all duration-300"
               />
             )}
+
+            {/* Axis Break Marker — two parallel slashes across the compressed band */}
+            {(compressionReadyX || compressionReadyY) && (() => {
+              const onX = compressionReadyX;
+              const mid = (breakNumMin + breakNumMax) / 2;
+              const c1 = onX ? toPoints(mid, 0) : toPoints(0, mid);
+              // Small offset between the two parallel slashes (in canvas px)
+              const off = 4;
+              const len = 6;
+              if (onX) {
+                return (
+                  <g className="animate-in fade-in duration-300">
+                    <line x1={c1.x - off} y1={c1.y - len} x2={c1.x - off + 3} y2={c1.y + len} stroke="#fff" strokeWidth={2.5} />
+                    <line x1={c1.x + off} y1={c1.y - len} x2={c1.x + off + 3} y2={c1.y + len} stroke="#fff" strokeWidth={2.5} />
+                    <line x1={c1.x - off} y1={c1.y - len} x2={c1.x - off + 3} y2={c1.y + len} stroke="#000" strokeWidth={0.75} />
+                    <line x1={c1.x + off} y1={c1.y - len} x2={c1.x + off + 3} y2={c1.y + len} stroke="#000" strokeWidth={0.75} />
+                  </g>
+                );
+              }
+              return (
+                <g className="animate-in fade-in duration-300">
+                  <line x1={c1.x - len} y1={c1.y - off} x2={c1.x + len} y2={c1.y - off + 3} stroke="#fff" strokeWidth={2.5} />
+                  <line x1={c1.x - len} y1={c1.y + off} x2={c1.x + len} y2={c1.y + off + 3} stroke="#fff" strokeWidth={2.5} />
+                  <line x1={c1.x - len} y1={c1.y - off} x2={c1.x + len} y2={c1.y - off + 3} stroke="#000" strokeWidth={0.75} />
+                  <line x1={c1.x - len} y1={c1.y + off} x2={c1.x + len} y2={c1.y + off + 3} stroke="#000" strokeWidth={0.75} />
+                </g>
+              );
+            })()}
 
             {/* Ticks & Number Labels */}
             {settings.showTicks && (
