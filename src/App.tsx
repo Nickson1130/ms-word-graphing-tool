@@ -310,17 +310,38 @@ export default function MathGraphDesigner() {
   const compressionReadyX = breakActiveX && breakMinSx !== null && breakMaxSx !== null && breakMaxSx > breakMinSx;
   const compressionReadyY = breakActiveY && breakMinSy !== null && breakMaxSy !== null && breakMaxSy > breakMinSy;
 
+  // Smooth piecewise compression: identity outside [a,b], slope=c on the inner
+  // plateau, smoothstep transitions in the first/last TRANSITION_FRACTION of the band.
+  // This makes the curve C¹ at the band edges so there's no visible kink.
+  const TRANSITION_FRACTION = 0.2;
+  const compressSmooth = (s: number, a: number, b: number, c: number): number => {
+    const h = b - a;
+    const w = TRANSITION_FRACTION;
+    const totalImageLen = h * (c + w * (1 - c));
+    if (s <= a) return s;
+    if (s >= b) return a + totalImageLen + (s - b);
+    const t = (s - a) / h;
+    if (t < w) {
+      const tau = t / w;
+      // ∫₀^τ (1 - (1-c)·S(u)) du  where S(u) = 3u² - 2u³
+      return a + w * h * (tau - (1 - c) * (tau * tau * tau - 0.5 * tau * tau * tau * tau));
+    }
+    if (t > 1 - w) {
+      const tau = (1 - t) / w;
+      return a + totalImageLen - w * h * (tau - (1 - c) * (tau * tau * tau - 0.5 * tau * tau * tau * tau));
+    }
+    // Plateau: slope c starting from the right end of the left transition zone
+    return a + w * h * (1 + c) / 2 + c * (s - a - w * h);
+  };
+
   const tx = useMemo(() => {
     if (!compressionReadyX) return txBase;
     const a = breakMinSx as number;
     const b = breakMaxSx as number;
-    const span = b - a;
     return (v: number) => {
       const s = txBase(v);
       if (s === null) return null;
-      if (s <= a) return s;
-      if (s >= b) return a + span * breakC + (s - b);
-      return a + (s - a) * breakC;
+      return compressSmooth(s, a, b, breakC);
     };
   }, [txBase, compressionReadyX, breakMinSx, breakMaxSx, breakC]);
 
@@ -328,13 +349,10 @@ export default function MathGraphDesigner() {
     if (!compressionReadyY) return tyBase;
     const a = breakMinSy as number;
     const b = breakMaxSy as number;
-    const span = b - a;
     return (v: number) => {
       const s = tyBase(v);
       if (s === null) return null;
-      if (s <= a) return s;
-      if (s >= b) return a + span * breakC + (s - b);
-      return a + (s - a) * breakC;
+      return compressSmooth(s, a, b, breakC);
     };
   }, [tyBase, compressionReadyY, breakMinSy, breakMaxSy, breakC]);
 
@@ -754,19 +772,23 @@ export default function MathGraphDesigner() {
       .filter(i => {
         // Hide if at or outside x-axis boundaries (approx)
         if (Math.abs(i.y) < 0.001) {
-          return i.x > nXMin + 0.01 && i.x < nXMax - 0.01;
+          if (!(i.x > nXMin + 0.01 && i.x < nXMax - 0.01)) return false;
+          // Also hide x-intercepts that land in/at the compressed x-band
+          if (compressionReadyX && i.x >= breakNumMin - 1e-6 && i.x <= breakNumMax + 1e-6) return false;
         }
         // Hide if at or outside y-axis boundaries (approx)
         if (Math.abs(i.x) < 0.001) {
-          return i.y > nYMin + 0.01 && i.y < nYMax - 0.01;
+          if (!(i.y > nYMin + 0.01 && i.y < nYMax - 0.01)) return false;
+          if (compressionReadyY && i.y >= breakNumMin - 1e-6 && i.y <= breakNumMax + 1e-6) return false;
         }
         return true;
       });
-  }, [allCurvePoints, settings.showXIntercepts, settings.showYIntercepts, settings.equations, nXMin, nXMax, nYMin, nYMax]);
+  }, [allCurvePoints, settings.showXIntercepts, settings.showYIntercepts, settings.equations, nXMin, nXMax, nYMin, nYMax, compressionReadyX, compressionReadyY, breakNumMin, breakNumMax]);
 
-  // Hide labels that sit inside the compression band — they'd visually pile up.
-  const inBreakBandX = (v: number) => compressionReadyX && v > breakNumMin + 1e-6 && v < breakNumMax - 1e-6;
-  const inBreakBandY = (v: number) => compressionReadyY && v > breakNumMin + 1e-6 && v < breakNumMax - 1e-6;
+  // Hide labels that sit inside the compression band OR at its boundaries —
+  // they'd visually pile up next to the break marker.
+  const inBreakBandX = (v: number) => compressionReadyX && v >= breakNumMin - 1e-6 && v <= breakNumMax + 1e-6;
+  const inBreakBandY = (v: number) => compressionReadyY && v >= breakNumMin - 1e-6 && v <= breakNumMax + 1e-6;
 
   const xTicks = useMemo(() => {
     let arr: number[];
