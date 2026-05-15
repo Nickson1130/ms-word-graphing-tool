@@ -320,6 +320,9 @@ export default function MathGraphDesigner() {
     return out;
   }, [settings.axisBreakEnabled, settings.axisBreakBands, txBase]);
 
+  // Y-axis bands: Range is an *x-interval* (not y!) where the curve's y
+  // values are multiplied by the scale factor. So Y-band {min:1, max:5, c:1.6}
+  // means "for curve points with x in [1, 5], stretch y by 1.6×."
   const scaledYBands = useMemo<ScaledBand[]>(() => {
     if (!settings.axisBreakEnabled) return [];
     const out: ScaledBand[] = [];
@@ -328,13 +331,13 @@ export default function MathGraphDesigner() {
       const numMin = parseFloat(band.min);
       const numMax = parseFloat(band.max);
       if (!isFinite(numMin) || !isFinite(numMax) || numMax <= numMin) continue;
-      const sa = tyBase(numMin);
-      const sb = tyBase(numMax);
+      const sa = txBase(numMin);
+      const sb = txBase(numMax);
       if (sa === null || sb === null || sb <= sa) continue;
       out.push({ a: sa, b: sb, c: Math.max(0, band.compression) });
     }
     return out;
-  }, [settings.axisBreakEnabled, settings.axisBreakBands, tyBase]);
+  }, [settings.axisBreakEnabled, settings.axisBreakBands, txBase]);
 
   // Gradual band compression / stretch that resizes the band's image width.
   //
@@ -380,21 +383,35 @@ export default function MathGraphDesigner() {
   const tx = txBase;
   const ty = tyBase;
 
-  // Per-curve compression: for each band on the relevant axis, compute the
-  // displacement compressGradual produces at this point and sum them. With
-  // disjoint bands, displacements add up correctly; only opt-in curves
-  // (useCompression === true) are affected.
+  // Per-curve compression — only opt-in curves (useCompression === true)
+  // are affected.
+  //
+  // X-bands compress/stretch the x-coordinate inside the band; displacements
+  // sum across disjoint bands.
   const compressXForCurve = (s: number): number => {
     if (scaledXBands.length === 0) return s;
     let total = 0;
     for (const { a, b, c } of scaledXBands) total += compressGradual(s, a, b, c) - s;
     return s + total;
   };
-  const compressYForCurve = (s: number): number => {
-    if (scaledYBands.length === 0) return s;
-    let total = 0;
-    for (const { a, b, c } of scaledYBands) total += compressGradual(s, a, b, c) - s;
-    return s + total;
+
+  // Y-band scale factor at a given x: smooth raised-cosine bump going 1
+  // outside the band → c at the middle → 1 again, with slope 0 at the
+  // band edges so the curve transitions in/out smoothly.
+  const yFactorAtX = (sx: number, a: number, b: number, c: number): number => {
+    if (sx <= a || sx >= b) return 1;
+    const tau = (sx - a) / (b - a);
+    const window = 0.5 - 0.5 * Math.cos(2 * Math.PI * tau);
+    return 1 + (Math.max(0, c) - 1) * window;
+  };
+
+  // For each Y-band whose x-interval contains the curve's (pre-x-compression)
+  // scaled x, multiply the curve's scaled y by the band's local factor.
+  const compressYForCurve = (sy: number, sx: number): number => {
+    if (scaledYBands.length === 0) return sy;
+    let factor = 1;
+    for (const { a, b, c } of scaledYBands) factor *= yFactorAtX(sx, a, b, c);
+    return sy * factor;
   };
 
   // Is a log-like scale active? Used to hide origin label etc.
@@ -988,8 +1005,8 @@ Sub DrawGraph()
            const ysRaw = ty(i.y);
            const exRaw = xsRaw === null ? i.x : xsRaw;
            const eyRaw = ysRaw === null ? i.y : ysRaw;
+           const ey = useComp ? compressYForCurve(eyRaw, exRaw) : eyRaw;
            const ex = useComp ? compressXForCurve(exRaw) : exRaw;
-           const ey = useComp ? compressYForCurve(eyRaw) : eyRaw;
            const xExpr = `(${jsOriginX} + (${ex} * unitSize))`;
            const yExpr = `(${jsOriginY} - (${ey} * unitSize))`;
            if (i.y === 0) { // X-intercept: tick perpendicular to x-axis, centered on curve
@@ -1060,8 +1077,9 @@ Sub DrawGraph()
           let yScaled = ty(p.y);
           if (xScaled === null || yScaled === null) return ''; // skip invalid
           if (curveCompress) {
-            xScaled = compressXForCurve(xScaled);
-            yScaled = compressYForCurve(yScaled);
+            const sxOrig = xScaled;
+            yScaled = compressYForCurve(yScaled, sxOrig);
+            xScaled = compressXForCurve(sxOrig);
           }
           const xPos = jsOriginX + (xScaled * settings.unitSize);
           const yPos = jsOriginY - (yScaled * settings.unitSize);
@@ -1694,7 +1712,7 @@ End Sub
                       ))}
                     </div>
                     <p className="text-[9px] text-stone-400 italic leading-snug">
-                      Each band rescales its data range by the scale factor (0 collapses to a line, 1 unchanged, &gt;1 stretches). Bands on the same axis should be disjoint. Curves only show the effect when "Use compression bands" is enabled on the equation.
+                      Range is always an x-interval. Axis X rescales the x-coordinate inside that interval (0 = collapsed to a vertical line, 1 = unchanged, &gt;1 = horizontal stretch). Axis Y multiplies the curve's y values for x in that interval (0 = flattens to x-axis, 1 = unchanged, &gt;1 = vertical stretch). Bands on the same axis should be disjoint, and curves only show the effect when "Use compression bands" is enabled on the equation.
                     </p>
                   </div>
                 )}
@@ -2143,8 +2161,8 @@ End Sub
                     let ys = ty(p.y);
                     const ex0 = xs === null ? p.x : xs;
                     const ey0 = ys === null ? p.y : ys;
+                    const ey = curveCompress ? compressYForCurve(ey0, ex0) : ey0;
                     const ex = curveCompress ? compressXForCurve(ex0) : ex0;
-                    const ey = curveCompress ? compressYForCurve(ey0) : ey0;
                     return {
                       x: scaledOriginX + ex * settings.unitSize,
                       y: scaledOriginY - ey * settings.unitSize,
@@ -2209,8 +2227,8 @@ End Sub
               const ys = ty(label.y);
               const exRaw = xs === null ? label.x : xs;
               const eyRaw = ys === null ? label.y : ys;
+              const ey = compress ? compressYForCurve(eyRaw, exRaw) : eyRaw;
               const ex = compress ? compressXForCurve(exRaw) : exRaw;
-              const ey = compress ? compressYForCurve(eyRaw) : eyRaw;
               const x = scaledOriginX + ex * settings.unitSize;
               const y = scaledOriginY - ey * settings.unitSize;
               if (x < -20 || x > canvasWidth + 20 || y < -20 || y > canvasHeight + 20) return null;
