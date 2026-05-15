@@ -312,22 +312,43 @@ export default function MathGraphDesigner() {
   const compressionReadyX = breakActiveX && breakMinSx !== null && breakMaxSx !== null && breakMaxSx > breakMinSx;
   const compressionReadyY = breakActiveY && breakMinSy !== null && breakMaxSy !== null && breakMaxSy > breakMinSy;
 
-  // Symmetric, axis-aligned compression. Maps s ∈ [a, b] to the same interval
-  // with f(a)=a, f(b)=b, f'(a)=f'(b)=1 (no kink at edges, no rightward shift),
-  // and slope = c at the band center. When c=0 the slope hits exactly 0 in the
-  // middle, so the curve is squeezed toward a true vertical line.
+  // Gradual band compression that actually shrinks the band's image width.
   //
-  //   f(s) = center + (s - center) * (1 - (1 - c) * sin²(π · (s - a) / h))
+  // Input band [a, b] (width h) is mapped to an image of width c·h centered on
+  // the same midpoint. Outside the band, the curve is shifted inward by
+  // h·(1−c)/2 so it joins continuously with the band image.
   //
-  // Outside [a, b] this is the identity, so axes/ticks/other curves are
-  // unaffected — only curves that opt in via `useCompression` get compressed.
-  const compressSymmetric = (s: number, a: number, b: number, c: number): number => {
-    if (s <= a || s >= b) return s;
+  // Inside the band we use cos² ramps of width w·h at each boundary, with an
+  // optional plateau of slope p in between, picked so the derivative is
+  // exactly 1 at the band edges (no kink) and averages to c overall:
+  //   w = min(c, 0.5),   p = (c − w)/(1 − w)
+  //
+  // For c=1 → identity. For c=0 the band collapses to a single point at the
+  // band midpoint (the curve segment inside the band becomes a vertical line).
+  // Anywhere in between you get a smooth, kink-free squeeze.
+  const compressGradual = (s: number, a: number, b: number, c: number): number => {
     const h = b - a;
-    const center = (a + b) / 2;
-    const phase = Math.sin(Math.PI * (s - a) / h);
-    const attenuation = 1 - (1 - c) * phase * phase;
-    return center + (s - center) * attenuation;
+    const cc = Math.max(0, Math.min(1, c));
+    const halfShift = h * (1 - cc) / 2;
+    if (s <= a) return s + halfShift;
+    if (s >= b) return s - halfShift;
+    if (cc === 0) return a + h / 2; // entire band collapses to its midpoint
+
+    const tau = (s - a) / h;
+    const w = Math.min(cc, 0.5);
+    const p = (cc - w) / (1 - w);
+
+    let G: number;
+    if (tau <= w) {
+      G = p * tau + (1 - p) * (tau / 2 + (w / (2 * Math.PI)) * Math.sin(Math.PI * tau / w));
+    } else if (tau >= 1 - w) {
+      const tauR = 1 - tau;
+      const GR = p * tauR + (1 - p) * (tauR / 2 + (w / (2 * Math.PI)) * Math.sin(Math.PI * tauR / w));
+      G = cc - GR;
+    } else {
+      G = w * (1 + p) / 2 + p * (tau - w);
+    }
+    return a + halfShift + h * G;
   };
 
   // tx/ty are pure axis transforms — no compression applied here so axes,
@@ -340,11 +361,11 @@ export default function MathGraphDesigner() {
   // equation has useCompression === true.
   const compressXForCurve = (s: number): number => {
     if (!compressionReadyX) return s;
-    return compressSymmetric(s, breakMinSx as number, breakMaxSx as number, breakC);
+    return compressGradual(s, breakMinSx as number, breakMaxSx as number, breakC);
   };
   const compressYForCurve = (s: number): number => {
     if (!compressionReadyY) return s;
-    return compressSymmetric(s, breakMinSy as number, breakMaxSy as number, breakC);
+    return compressGradual(s, breakMinSy as number, breakMaxSy as number, breakC);
   };
 
   // Is a log-like scale active? Used to hide origin label etc.
@@ -1560,7 +1581,7 @@ End Sub
                       <span className="text-[10px] text-stone-500 font-mono w-10 text-right">{settings.axisBreakCompression.toFixed(2)}×</span>
                     </div>
                     <p className="text-[9px] text-stone-400 italic leading-snug">
-                      Shrinks the chosen interval by this factor (0 = fully collapsed, 1 = unchanged). Useful for compact plots with one wide gap.
+                      Shrinks the band's image width to this fraction of the original (0 = collapsed to a line, 1 = unchanged). Transitions stay smooth at the band edges. Only curves with "Use compression band" enabled are affected.
                     </p>
                   </div>
                 )}
