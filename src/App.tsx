@@ -315,7 +315,7 @@ export default function MathGraphDesigner() {
       const sa = txBase(numMin);
       const sb = txBase(numMax);
       if (sa === null || sb === null || sb <= sa) continue;
-      out.push({ a: sa, b: sb, c: Math.max(0, Math.min(1, band.compression)) });
+      out.push({ a: sa, b: sb, c: Math.max(0, band.compression) });
     }
     return out;
   }, [settings.axisBreakEnabled, settings.axisBreakBands, txBase]);
@@ -331,28 +331,28 @@ export default function MathGraphDesigner() {
       const sa = tyBase(numMin);
       const sb = tyBase(numMax);
       if (sa === null || sb === null || sb <= sa) continue;
-      out.push({ a: sa, b: sb, c: Math.max(0, Math.min(1, band.compression)) });
+      out.push({ a: sa, b: sb, c: Math.max(0, band.compression) });
     }
     return out;
   }, [settings.axisBreakEnabled, settings.axisBreakBands, tyBase]);
 
-  // Gradual band compression that actually shrinks the band's image width.
+  // Gradual band compression / stretch that resizes the band's image width.
   //
   // Input band [a, b] (width h) is mapped to an image of width c·h centered on
-  // the same midpoint. Outside the band, the curve is shifted inward by
-  // h·(1−c)/2 so it joins continuously with the band image.
+  // the same midpoint. Outside the band, the curve is shifted by h·(1−c)/2 so
+  // it joins continuously with the band image (inward for c<1, outward for c>1).
   //
-  // Inside the band we use cos² ramps of width w·h at each boundary, with an
-  // optional plateau of slope p in between, picked so the derivative is
-  // exactly 1 at the band edges (no kink) and averages to c overall:
+  // Inside the band we use cos² ramps of width w·h at each boundary, with a
+  // plateau of slope p in between, picked so the derivative is exactly 1 at
+  // the band edges (no kink) and averages to c overall:
   //   w = min(c, 0.5),   p = (c − w)/(1 − w)
   //
   // For c=1 → identity. For c=0 the band collapses to a single point at the
-  // band midpoint (the curve segment inside the band becomes a vertical line).
-  // Anywhere in between you get a smooth, kink-free squeeze.
+  // band midpoint. For c>1 the band stretches (plateau slope p>1) — the rest
+  // of the curve is pushed outward by h(c−1)/2 on each side.
   const compressGradual = (s: number, a: number, b: number, c: number): number => {
     const h = b - a;
-    const cc = Math.max(0, Math.min(1, c));
+    const cc = Math.max(0, c);
     const halfShift = h * (1 - cc) / 2;
     if (s <= a) return s + halfShift;
     if (s >= b) return s - halfShift;
@@ -707,7 +707,7 @@ export default function MathGraphDesigner() {
   const intercepts = useMemo(() => {
     if (!settings.showXIntercepts && !settings.showYIntercepts) return [];
     
-    let allIntercepts: (CustomLabel & { isAuto: boolean; axis: 'x' | 'y' })[] = [];
+    let allIntercepts: (CustomLabel & { isAuto: boolean; axis: 'x' | 'y'; curveIdx: number })[] = [];
     allCurvePoints.forEach((curve, cIdx) => {
       curve.segments.forEach((segment, sIdx) => {
         if (segment.length < 2) return;
@@ -729,14 +729,15 @@ export default function MathGraphDesigner() {
               // Check if x=0 is in this segment
               const xInRange = segment.some(p => Math.abs(p.x) < 0.02);
               if (xInRange && Math.abs(Number(y0)) > 0.001) {
-                 allIntercepts.push({ 
-                   id: `y-int-${cIdx}-${sIdx}`, 
-                   x: 0, 
-                   y: Number(Number(y0).toFixed(2)), 
+                 allIntercepts.push({
+                   id: `y-int-${cIdx}-${sIdx}`,
+                   x: 0,
+                   y: Number(Number(y0).toFixed(2)),
                    text: '', // No numbers for auto intercepts
                    symbol: 'dot',
                    isAuto: true,
-                   axis: 'y'
+                   axis: 'y',
+                   curveIdx: cIdx
                  });
               }
             }
@@ -765,14 +766,15 @@ export default function MathGraphDesigner() {
               xInt = p1.x - (p1.y * (p2.x - p1.x)) / (p2.y - p1.y);
             }
             if (Math.abs(xInt) > 0.001) {
-              allIntercepts.push({ 
-                id: `x-int-${cIdx}-${sIdx}-${i}`, 
-                x: Number(xInt.toFixed(2)), 
-                y: 0, 
-                text: '', 
+              allIntercepts.push({
+                id: `x-int-${cIdx}-${sIdx}-${i}`,
+                x: Number(xInt.toFixed(2)),
+                y: 0,
+                text: '',
                 symbol: 'dot',
                 isAuto: true,
-                axis: 'x'
+                axis: 'x',
+                curveIdx: cIdx
               });
             }
           }
@@ -787,14 +789,15 @@ export default function MathGraphDesigner() {
               yInt = p1.y - (p1.x * (p2.y - p1.y)) / (p2.x - p1.x);
             }
             if (Math.abs(yInt) > 0.001) {
-              allIntercepts.push({ 
-                id: `y-seg-int-${cIdx}-${sIdx}-${i}`, 
-                x: 0, 
-                y: Number(yInt.toFixed(2)), 
-                text: '', 
+              allIntercepts.push({
+                id: `y-seg-int-${cIdx}-${sIdx}-${i}`,
+                x: 0,
+                y: Number(yInt.toFixed(2)),
+                text: '',
                 symbol: 'dot',
                 isAuto: true,
-                axis: 'y'
+                axis: 'y',
+                curveIdx: cIdx
               });
             }
           }
@@ -979,14 +982,24 @@ Sub DrawGraph()
     If ${settings.showXIntercepts || settings.showYIntercepts ? 'True' : 'False'} Then
         debugStep = "Drawing Intercept Ticks"
         ${intercepts.map(i => {
-           if (i.y === 0) { // X-intercept
+           const eq = (i as any).curveIdx !== undefined ? settings.equations[(i as any).curveIdx] : undefined;
+           const useComp = !!eq?.useCompression;
+           const xsRaw = tx(i.x);
+           const ysRaw = ty(i.y);
+           const exRaw = xsRaw === null ? i.x : xsRaw;
+           const eyRaw = ysRaw === null ? i.y : ysRaw;
+           const ex = useComp ? compressXForCurve(exRaw) : exRaw;
+           const ey = useComp ? compressYForCurve(eyRaw) : eyRaw;
+           const xExpr = `(${jsOriginX} + (${ex} * unitSize))`;
+           const yExpr = `(${jsOriginY} - (${ey} * unitSize))`;
+           if (i.y === 0) { // X-intercept: tick perpendicular to x-axis, centered on curve
              return `
-        Set tick = doc.Shapes.AddLine(${vbaX(i.x)}, originY - 4, ${vbaX(i.x)}, originY + 4)
+        Set tick = doc.Shapes.AddLine(${xExpr}, ${yExpr} - 4, ${xExpr}, ${yExpr} + 4)
         tick.Line.ForeColor.RGB = 0: tick.Line.Weight = ${settings.tickWidth}
         shpCount = shpCount + 1: ReDim Preserve shpArray(1 To shpCount): shpArray(shpCount) = tick.Name`;
-           } else { // Y-intercept
+           } else { // Y-intercept: tick perpendicular to y-axis, centered on curve
              return `
-        Set tick = doc.Shapes.AddLine(originX - 4, ${vbaY(i.y)}, originX + 4, ${vbaY(i.y)})
+        Set tick = doc.Shapes.AddLine(${xExpr} - 4, ${yExpr}, ${xExpr} + 4, ${yExpr})
         tick.Line.ForeColor.RGB = 0: tick.Line.Weight = ${settings.tickWidth}
         shpCount = shpCount + 1: ReDim Preserve shpArray(1 To shpCount): shpArray(shpCount) = tick.Name`;
            }
@@ -1637,7 +1650,7 @@ End Sub
                           <div className="flex items-center justify-between gap-1">
                             <span className="text-[10px] text-stone-500 w-10">Range</span>
                             <input
-                              type="text" value={band.min}
+                              type="number" step="0.1" value={band.min}
                               onChange={(e) => setSettings({
                                 ...settings,
                                 axisBreakBands: settings.axisBreakBands.map(b => b.id === band.id ? { ...b, min: e.target.value } : b),
@@ -1647,7 +1660,7 @@ End Sub
                             />
                             <span className="text-stone-300 text-[9px]">to</span>
                             <input
-                              type="text" value={band.max}
+                              type="number" step="0.1" value={band.max}
                               onChange={(e) => setSettings({
                                 ...settings,
                                 axisBreakBands: settings.axisBreakBands.map(b => b.id === band.id ? { ...b, max: e.target.value } : b),
@@ -1657,9 +1670,9 @@ End Sub
                             />
                           </div>
                           <div className="flex items-center justify-between gap-2">
-                            <span className="text-[10px] text-stone-500 w-10">Shrink</span>
+                            <span className="text-[10px] text-stone-500 w-10">Scale</span>
                             <input
-                              type="range" min="0" max="1" step="0.01"
+                              type="range" min="0" max="3" step="0.01"
                               value={band.compression}
                               onChange={(e) => setSettings({
                                 ...settings,
@@ -1667,13 +1680,21 @@ End Sub
                               })}
                               className="flex-1 accent-stone-900"
                             />
-                            <span className="text-[10px] text-stone-500 font-mono w-9 text-right">{band.compression.toFixed(2)}×</span>
+                            <input
+                              type="number" min="0" step="0.05"
+                              value={band.compression}
+                              onChange={(e) => setSettings({
+                                ...settings,
+                                axisBreakBands: settings.axisBreakBands.map(b => b.id === band.id ? { ...b, compression: Number(e.target.value) } : b),
+                              })}
+                              className="w-14 bg-stone-50 border border-stone-200 p-1 rounded text-[10px] font-mono text-right"
+                            />
                           </div>
                         </div>
                       ))}
                     </div>
                     <p className="text-[9px] text-stone-400 italic leading-snug">
-                      Each band shrinks its data range to that fraction of the original (0 = collapsed to a line, 1 = unchanged). Bands on the same axis should be disjoint. Curves only show compression when "Use compression bands" is enabled on the equation.
+                      Each band rescales its data range by the scale factor (0 collapses to a line, 1 unchanged, &gt;1 stretches). Bands on the same axis should be disjoint. Curves only show the effect when "Use compression bands" is enabled on the equation.
                     </p>
                   </div>
                 )}
@@ -2181,7 +2202,17 @@ End Sub
 
             {/* Custom Labels & Detected Intercepts */}
             {[...intercepts, ...settings.customLabels].map((label, idx) => {
-              const { x, y } = toPoints(label.x, label.y);
+              const curveIdx = (label as any).curveIdx as number | undefined;
+              const eqForLabel = curveIdx !== undefined ? settings.equations[curveIdx] : undefined;
+              const compress = !!eqForLabel?.useCompression;
+              const xs = tx(label.x);
+              const ys = ty(label.y);
+              const exRaw = xs === null ? label.x : xs;
+              const eyRaw = ys === null ? label.y : ys;
+              const ex = compress ? compressXForCurve(exRaw) : exRaw;
+              const ey = compress ? compressYForCurve(eyRaw) : eyRaw;
+              const x = scaledOriginX + ex * settings.unitSize;
+              const y = scaledOriginY - ey * settings.unitSize;
               if (x < -20 || x > canvasWidth + 20 || y < -20 || y > canvasHeight + 20) return null;
               const sym = label.symbol || 'cross';
               const isAutoInt = (label as any).isAuto;
