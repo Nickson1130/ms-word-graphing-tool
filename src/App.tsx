@@ -101,6 +101,7 @@ interface Equation {
   dashStyle: string; // msoLineDashStyle value
   color: string; // hex color
   intervals: Interval[];
+  useCompression?: boolean; // opt-in: apply the axis compression band to this curve
 }
 
 interface GraphSettings {
@@ -190,12 +191,13 @@ const DEFAULT_SETTINGS: GraphSettings = {
   yAxisLabel: 'y',
   showOrigin: true,
   equations: [
-    { 
-      id: '1', 
-      expression: 'y = x^2', 
-      lineWidth: 0.75, 
+    {
+      id: '1',
+      expression: 'y = x^2',
+      lineWidth: 0.75,
       dashStyle: 'msoLineSolid',
       color: '#000000',
+      useCompression: false,
       intervals: [
         {
           id: 'int-1',
@@ -310,51 +312,40 @@ export default function MathGraphDesigner() {
   const compressionReadyX = breakActiveX && breakMinSx !== null && breakMaxSx !== null && breakMaxSx > breakMinSx;
   const compressionReadyY = breakActiveY && breakMinSy !== null && breakMaxSy !== null && breakMaxSy > breakMinSy;
 
-  // Smooth piecewise compression: identity outside [a,b], slope=c on the inner
-  // plateau, smoothstep transitions in the first/last TRANSITION_FRACTION of the band.
-  // This makes the curve C¹ at the band edges so there's no visible kink.
-  const TRANSITION_FRACTION = 0.2;
-  const compressSmooth = (s: number, a: number, b: number, c: number): number => {
+  // Symmetric, axis-aligned compression. Maps s ∈ [a, b] to the same interval
+  // with f(a)=a, f(b)=b, f'(a)=f'(b)=1 (no kink at edges, no rightward shift),
+  // and slope = c at the band center. When c=0 the slope hits exactly 0 in the
+  // middle, so the curve is squeezed toward a true vertical line.
+  //
+  //   f(s) = center + (s - center) * (1 - (1 - c) * sin²(π · (s - a) / h))
+  //
+  // Outside [a, b] this is the identity, so axes/ticks/other curves are
+  // unaffected — only curves that opt in via `useCompression` get compressed.
+  const compressSymmetric = (s: number, a: number, b: number, c: number): number => {
+    if (s <= a || s >= b) return s;
     const h = b - a;
-    const w = TRANSITION_FRACTION;
-    const totalImageLen = h * (c + w * (1 - c));
-    if (s <= a) return s;
-    if (s >= b) return a + totalImageLen + (s - b);
-    const t = (s - a) / h;
-    if (t < w) {
-      const tau = t / w;
-      // ∫₀^τ (1 - (1-c)·S(u)) du  where S(u) = 3u² - 2u³
-      return a + w * h * (tau - (1 - c) * (tau * tau * tau - 0.5 * tau * tau * tau * tau));
-    }
-    if (t > 1 - w) {
-      const tau = (1 - t) / w;
-      return a + totalImageLen - w * h * (tau - (1 - c) * (tau * tau * tau - 0.5 * tau * tau * tau * tau));
-    }
-    // Plateau: slope c starting from the right end of the left transition zone
-    return a + w * h * (1 + c) / 2 + c * (s - a - w * h);
+    const center = (a + b) / 2;
+    const phase = Math.sin(Math.PI * (s - a) / h);
+    const attenuation = 1 - (1 - c) * phase * phase;
+    return center + (s - center) * attenuation;
   };
 
-  const tx = useMemo(() => {
-    if (!compressionReadyX) return txBase;
-    const a = breakMinSx as number;
-    const b = breakMaxSx as number;
-    return (v: number) => {
-      const s = txBase(v);
-      if (s === null) return null;
-      return compressSmooth(s, a, b, breakC);
-    };
-  }, [txBase, compressionReadyX, breakMinSx, breakMaxSx, breakC]);
+  // tx/ty are pure axis transforms — no compression applied here so axes,
+  // grids, ticks and non-opted-in curves stay untouched.
+  const tx = txBase;
+  const ty = tyBase;
 
-  const ty = useMemo(() => {
-    if (!compressionReadyY) return tyBase;
-    const a = breakMinSy as number;
-    const b = breakMaxSy as number;
-    return (v: number) => {
-      const s = tyBase(v);
-      if (s === null) return null;
-      return compressSmooth(s, a, b, breakC);
-    };
-  }, [tyBase, compressionReadyY, breakMinSy, breakMaxSy, breakC]);
+  // Per-curve compression: apply compressSymmetric only when the band is
+  // active on that axis. Used by curve rendering & VBA emission when an
+  // equation has useCompression === true.
+  const compressXForCurve = (s: number): number => {
+    if (!compressionReadyX) return s;
+    return compressSymmetric(s, breakMinSx as number, breakMaxSx as number, breakC);
+  };
+  const compressYForCurve = (s: number): number => {
+    if (!compressionReadyY) return s;
+    return compressSymmetric(s, breakMinSy as number, breakMaxSy as number, breakC);
+  };
 
   // Is a log-like scale active? Used to hide origin label etc.
   const xIsLog = ['log10', 'log2', 'ln'].includes(settings.xScaleMode);
@@ -773,44 +764,30 @@ export default function MathGraphDesigner() {
         // Hide if at or outside x-axis boundaries (approx)
         if (Math.abs(i.y) < 0.001) {
           if (!(i.x > nXMin + 0.01 && i.x < nXMax - 0.01)) return false;
-          // Also hide x-intercepts that land in/at the compressed x-band
-          if (compressionReadyX && i.x >= breakNumMin - 1e-6 && i.x <= breakNumMax + 1e-6) return false;
         }
         // Hide if at or outside y-axis boundaries (approx)
         if (Math.abs(i.x) < 0.001) {
           if (!(i.y > nYMin + 0.01 && i.y < nYMax - 0.01)) return false;
-          if (compressionReadyY && i.y >= breakNumMin - 1e-6 && i.y <= breakNumMax + 1e-6) return false;
         }
         return true;
       });
-  }, [allCurvePoints, settings.showXIntercepts, settings.showYIntercepts, settings.equations, nXMin, nXMax, nYMin, nYMax, compressionReadyX, compressionReadyY, breakNumMin, breakNumMax]);
-
-  // Hide labels that sit inside the compression band OR at its boundaries —
-  // they'd visually pile up next to the break marker.
-  const inBreakBandX = (v: number) => compressionReadyX && v >= breakNumMin - 1e-6 && v <= breakNumMax + 1e-6;
-  const inBreakBandY = (v: number) => compressionReadyY && v >= breakNumMin - 1e-6 && v <= breakNumMax + 1e-6;
+  }, [allCurvePoints, settings.showXIntercepts, settings.showYIntercepts, settings.equations, nXMin, nXMax, nYMin, nYMax]);
 
   const xTicks = useMemo(() => {
-    let arr: number[];
     if (settings.customXTicks.trim()) {
-      arr = settings.customXTicks.split(',').map(s => parseFloat(s.trim())).filter(n => !isNaN(n));
-    } else {
-      arr = Array.from({ length: Math.floor(nXMax - nXMin) + 1 }, (_, i) => Math.ceil(nXMin) + i)
-        .filter(x => x !== 0 && x > (nXMin + 0.01) && x < (nXMax - 0.01));
+      return settings.customXTicks.split(',').map(s => parseFloat(s.trim())).filter(n => !isNaN(n));
     }
-    return arr.filter(x => !inBreakBandX(x));
-  }, [settings.customXTicks, nXMin, nXMax, compressionReadyX, breakNumMin, breakNumMax]);
+    return Array.from({ length: Math.floor(nXMax - nXMin) + 1 }, (_, i) => Math.ceil(nXMin) + i)
+      .filter(x => x !== 0 && x > (nXMin + 0.01) && x < (nXMax - 0.01));
+  }, [settings.customXTicks, nXMin, nXMax]);
 
   const yTicks = useMemo(() => {
-    let arr: number[];
     if (settings.customYTicks.trim()) {
-      arr = settings.customYTicks.split(',').map(s => parseFloat(s.trim())).filter(n => !isNaN(n));
-    } else {
-      arr = Array.from({ length: Math.floor(nYMax - nYMin) + 1 }, (_, i) => Math.ceil(nYMin) + i)
-        .filter(y => y !== 0 && y > (nYMin + 0.01) && y < (nYMax - 0.01));
+      return settings.customYTicks.split(',').map(s => parseFloat(s.trim())).filter(n => !isNaN(n));
     }
-    return arr.filter(y => !inBreakBandY(y));
-  }, [settings.customYTicks, nYMin, nYMax, compressionReadyY, breakNumMin, breakNumMax]);
+    return Array.from({ length: Math.floor(nYMax - nYMin) + 1 }, (_, i) => Math.ceil(nYMin) + i)
+      .filter(y => y !== 0 && y > (nYMin + 0.01) && y < (nYMax - 0.01));
+  }, [settings.customYTicks, nYMin, nYMax]);
 
   // Gridline positions (in mathematical coordinates)
   const gridLines = useMemo(() => {
@@ -823,14 +800,14 @@ export default function MathGraphDesigner() {
     const xStart = Math.ceil(nXMin / sx) * sx;
     for (let x = xStart; x <= nXMax + 1e-9; x += sx) {
       // skip the axis line itself (x=0) since the axis draws it
-      if (Math.abs(x) > 1e-9 && !inBreakBandX(x)) xs.push(Number(x.toFixed(6)));
+      if (Math.abs(x) > 1e-9) xs.push(Number(x.toFixed(6)));
     }
     const yStart = Math.ceil(nYMin / sy) * sy;
     for (let y = yStart; y <= nYMax + 1e-9; y += sy) {
-      if (Math.abs(y) > 1e-9 && !inBreakBandY(y)) ys.push(Number(y.toFixed(6)));
+      if (Math.abs(y) > 1e-9) ys.push(Number(y.toFixed(6)));
     }
     return { xs, ys };
-  }, [settings.showGrid, settings.gridSpacingX, settings.gridSpacingY, nXMin, nXMax, nYMin, nYMax, compressionReadyX, compressionReadyY, breakNumMin, breakNumMax]);
+  }, [settings.showGrid, settings.gridSpacingX, settings.gridSpacingY, nXMin, nXMax, nYMin, nYMax]);
 
   // Map VBA String Constants to Integers for maximum compatibility
   const VBA_CONSTANTS: Record<string, number> = {
@@ -1012,12 +989,17 @@ Sub DrawGraph()
     Dim fb As FreeformBuilder, curveComp As Shape
     ${allCurvePoints.map((curve, idx) => {
       const dashInt = VBA_CONSTANTS[curve.dashStyle] || 1;
+      const curveCompress = settings.equations[idx]?.useCompression === true;
       return curve.segments.map((segment, sIdx) => {
         if (segment.length < 2) return '';
         const pointBuild = segment.map((p, pIdx) => {
-          const xScaled = tx(p.x);
-          const yScaled = ty(p.y);
+          let xScaled = tx(p.x);
+          let yScaled = ty(p.y);
           if (xScaled === null || yScaled === null) return ''; // skip invalid
+          if (curveCompress) {
+            xScaled = compressXForCurve(xScaled);
+            yScaled = compressYForCurve(yScaled);
+          }
           const xPos = jsOriginX + (xScaled * settings.unitSize);
           const yPos = jsOriginY - (yScaled * settings.unitSize);
           if (pIdx === 0) return `Set fb = doc.Shapes.BuildFreeform(1, ${xPos}, ${yPos})`;
@@ -1111,12 +1093,13 @@ End Sub
               <button 
                 onClick={() => setSettings({
                   ...settings,
-                  equations: [...settings.equations, { 
-                    id: Date.now().toString(), 
-                    expression: '', 
-                    lineWidth: 0.75, 
+                  equations: [...settings.equations, {
+                    id: Date.now().toString(),
+                    expression: '',
+                    lineWidth: 0.75,
                     dashStyle: 'msoLineSolid',
                     color: '#000000',
+                    useCompression: false,
                     intervals: [
                       {
                         id: 'int-' + Date.now(),
@@ -1296,10 +1279,25 @@ End Sub
                     </div>
                   </div>
 
+                  {settings.axisBreakEnabled && (
+                    <div className="flex items-center justify-between border-t border-stone-100 pt-2">
+                      <span className="text-[10px] text-stone-500 font-bold uppercase tracking-tighter">Use compression band</span>
+                      <button
+                        onClick={() => {
+                          const newEqs = settings.equations.map(l => l.id === eq.id ? { ...l, useCompression: !l.useCompression } : l);
+                          setSettings({ ...settings, equations: newEqs });
+                        }}
+                        className={cn("text-[9px] uppercase px-2 py-0.5 rounded font-bold tracking-wide", eq.useCompression ? "bg-stone-900 text-white" : "bg-stone-200 text-stone-500")}
+                      >
+                        {eq.useCompression ? "On" : "Off"}
+                      </button>
+                    </div>
+                  )}
+
                   <div className="grid grid-cols-3 gap-2 border-t border-stone-100 pt-2">
                     <div className="space-y-1">
                       <span className="text-[10px] text-stone-400 uppercase">Width</span>
-                      <input 
+                      <input
                         type="number" step="0.25" min="0.25"
                         value={eq.lineWidth}
                         onChange={(e) => {
@@ -1974,34 +1972,6 @@ End Sub
               />
             )}
 
-            {/* Axis Break Marker — two parallel slashes across the compressed band */}
-            {(compressionReadyX || compressionReadyY) && (() => {
-              const onX = compressionReadyX;
-              const mid = (breakNumMin + breakNumMax) / 2;
-              const c1 = onX ? toPoints(mid, 0) : toPoints(0, mid);
-              // Small offset between the two parallel slashes (in canvas px)
-              const off = 4;
-              const len = 6;
-              if (onX) {
-                return (
-                  <g className="animate-in fade-in duration-300">
-                    <line x1={c1.x - off} y1={c1.y - len} x2={c1.x - off + 3} y2={c1.y + len} stroke="#fff" strokeWidth={2.5} />
-                    <line x1={c1.x + off} y1={c1.y - len} x2={c1.x + off + 3} y2={c1.y + len} stroke="#fff" strokeWidth={2.5} />
-                    <line x1={c1.x - off} y1={c1.y - len} x2={c1.x - off + 3} y2={c1.y + len} stroke="#000" strokeWidth={0.75} />
-                    <line x1={c1.x + off} y1={c1.y - len} x2={c1.x + off + 3} y2={c1.y + len} stroke="#000" strokeWidth={0.75} />
-                  </g>
-                );
-              }
-              return (
-                <g className="animate-in fade-in duration-300">
-                  <line x1={c1.x - len} y1={c1.y - off} x2={c1.x + len} y2={c1.y - off + 3} stroke="#fff" strokeWidth={2.5} />
-                  <line x1={c1.x - len} y1={c1.y + off} x2={c1.x + len} y2={c1.y + off + 3} stroke="#fff" strokeWidth={2.5} />
-                  <line x1={c1.x - len} y1={c1.y - off} x2={c1.x + len} y2={c1.y - off + 3} stroke="#000" strokeWidth={0.75} />
-                  <line x1={c1.x - len} y1={c1.y + off} x2={c1.x + len} y2={c1.y + off + 3} stroke="#000" strokeWidth={0.75} />
-                </g>
-              );
-            })()}
-
             {/* Ticks & Number Labels */}
             {settings.showTicks && (
               <g className="animate-in fade-in duration-300">
@@ -2030,10 +2000,22 @@ End Sub
             )}
 
             {/* Curves */}
-            {allCurvePoints.map((curve) => (
+            {allCurvePoints.map((curve, idx) => (
               <g key={curve.id}>
                 {curve.segments.map((segment, sIdx) => {
-                  const pts = segment.map(p => toPoints(p.x, p.y));
+                  const curveCompress = settings.equations[idx]?.useCompression === true;
+                  const pts = segment.map(p => {
+                    let xs = tx(p.x);
+                    let ys = ty(p.y);
+                    const ex0 = xs === null ? p.x : xs;
+                    const ey0 = ys === null ? p.y : ys;
+                    const ex = curveCompress ? compressXForCurve(ex0) : ex0;
+                    const ey = curveCompress ? compressYForCurve(ey0) : ey0;
+                    return {
+                      x: scaledOriginX + ex * settings.unitSize,
+                      y: scaledOriginY - ey * settings.unitSize,
+                    };
+                  });
                   let d = '';
                   if (pts.length === 0) {
                     d = '';
