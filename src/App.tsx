@@ -101,7 +101,15 @@ interface Equation {
   dashStyle: string; // msoLineDashStyle value
   color: string; // hex color
   intervals: Interval[];
-  useCompression?: boolean; // opt-in: apply the axis compression band to this curve
+  useCompression?: boolean; // opt-in: apply axis compression bands to this curve
+}
+
+interface AxisBreakBand {
+  id: string;
+  axis: 'x' | 'y';
+  min: string;          // interval lower bound (data coords)
+  max: string;          // interval upper bound (data coords)
+  compression: number;  // 0..1 — fraction of original band width kept
 }
 
 interface GraphSettings {
@@ -141,11 +149,8 @@ interface GraphSettings {
   yScaleMultiplier: number;
   xScaleCustom: string;     // custom expression, e.g. 'sqrt(x)', '1/x'
   yScaleCustom: string;
-  axisBreakEnabled: boolean;     // compress a sub-interval of one axis
-  axisBreakAxis: 'x' | 'y';
-  axisBreakMin: string;          // interval lower bound (data coords)
-  axisBreakMax: string;          // interval upper bound (data coords)
-  axisBreakCompression: number;  // 0..1 — fraction of original length kept
+  axisBreakEnabled: boolean;          // master switch — turns all bands on/off
+  axisBreakBands: AxisBreakBand[];    // disjoint compression bands; any mix of X and Y
 }
 
 // --- Constants ---
@@ -239,10 +244,7 @@ const DEFAULT_SETTINGS: GraphSettings = {
   xScaleCustom: 'x',
   yScaleCustom: 'y',
   axisBreakEnabled: false,
-  axisBreakAxis: 'y',
-  axisBreakMin: '-2',
-  axisBreakMax: '2',
-  axisBreakCompression: 0.2,
+  axisBreakBands: [],
 };
 
 export default function MathGraphDesigner() {
@@ -296,21 +298,43 @@ export default function MathGraphDesigner() {
     [settings.yScaleMode, settings.yScaleMultiplier, settings.yScaleCustom]
   );
 
-  // --- Axis compression band ---
-  // Piecewise-linear shrink of a sub-interval on one axis, applied in *scaled space*
-  // (after buildTransform). Lets the band coexist cleanly with linear / log / custom scales.
-  const breakNumMin = parseFloat(settings.axisBreakMin);
-  const breakNumMax = parseFloat(settings.axisBreakMax);
-  const breakC = Math.max(0, Math.min(1, settings.axisBreakCompression));
-  const breakValid = settings.axisBreakEnabled && isFinite(breakNumMin) && isFinite(breakNumMax) && breakNumMax > breakNumMin;
-  const breakActiveX = breakValid && settings.axisBreakAxis === 'x';
-  const breakActiveY = breakValid && settings.axisBreakAxis === 'y';
-  const breakMinSx = breakActiveX ? txBase(breakNumMin) : null;
-  const breakMaxSx = breakActiveX ? txBase(breakNumMax) : null;
-  const breakMinSy = breakActiveY ? tyBase(breakNumMin) : null;
-  const breakMaxSy = breakActiveY ? tyBase(breakNumMax) : null;
-  const compressionReadyX = breakActiveX && breakMinSx !== null && breakMaxSx !== null && breakMaxSx > breakMinSx;
-  const compressionReadyY = breakActiveY && breakMinSy !== null && breakMaxSy !== null && breakMaxSy > breakMinSy;
+  // --- Axis compression bands ---
+  // Compute the per-axis list of bands in scaled space (after buildTransform).
+  // Each band carries its post-scale interval and compression factor; the
+  // curve transforms sum displacements across all bands on the relevant axis,
+  // so multiple disjoint bands on X and/or Y compose naturally.
+  type ScaledBand = { a: number; b: number; c: number };
+  const scaledXBands = useMemo<ScaledBand[]>(() => {
+    if (!settings.axisBreakEnabled) return [];
+    const out: ScaledBand[] = [];
+    for (const band of settings.axisBreakBands) {
+      if (band.axis !== 'x') continue;
+      const numMin = parseFloat(band.min);
+      const numMax = parseFloat(band.max);
+      if (!isFinite(numMin) || !isFinite(numMax) || numMax <= numMin) continue;
+      const sa = txBase(numMin);
+      const sb = txBase(numMax);
+      if (sa === null || sb === null || sb <= sa) continue;
+      out.push({ a: sa, b: sb, c: Math.max(0, Math.min(1, band.compression)) });
+    }
+    return out;
+  }, [settings.axisBreakEnabled, settings.axisBreakBands, txBase]);
+
+  const scaledYBands = useMemo<ScaledBand[]>(() => {
+    if (!settings.axisBreakEnabled) return [];
+    const out: ScaledBand[] = [];
+    for (const band of settings.axisBreakBands) {
+      if (band.axis !== 'y') continue;
+      const numMin = parseFloat(band.min);
+      const numMax = parseFloat(band.max);
+      if (!isFinite(numMin) || !isFinite(numMax) || numMax <= numMin) continue;
+      const sa = tyBase(numMin);
+      const sb = tyBase(numMax);
+      if (sa === null || sb === null || sb <= sa) continue;
+      out.push({ a: sa, b: sb, c: Math.max(0, Math.min(1, band.compression)) });
+    }
+    return out;
+  }, [settings.axisBreakEnabled, settings.axisBreakBands, tyBase]);
 
   // Gradual band compression that actually shrinks the band's image width.
   //
@@ -356,16 +380,21 @@ export default function MathGraphDesigner() {
   const tx = txBase;
   const ty = tyBase;
 
-  // Per-curve compression: apply compressSymmetric only when the band is
-  // active on that axis. Used by curve rendering & VBA emission when an
-  // equation has useCompression === true.
+  // Per-curve compression: for each band on the relevant axis, compute the
+  // displacement compressGradual produces at this point and sum them. With
+  // disjoint bands, displacements add up correctly; only opt-in curves
+  // (useCompression === true) are affected.
   const compressXForCurve = (s: number): number => {
-    if (!compressionReadyX) return s;
-    return compressGradual(s, breakMinSx as number, breakMaxSx as number, breakC);
+    if (scaledXBands.length === 0) return s;
+    let total = 0;
+    for (const { a, b, c } of scaledXBands) total += compressGradual(s, a, b, c) - s;
+    return s + total;
   };
   const compressYForCurve = (s: number): number => {
-    if (!compressionReadyY) return s;
-    return compressGradual(s, breakMinSy as number, breakMaxSy as number, breakC);
+    if (scaledYBands.length === 0) return s;
+    let total = 0;
+    for (const { a, b, c } of scaledYBands) total += compressGradual(s, a, b, c) - s;
+    return s + total;
   };
 
   // Is a log-like scale active? Used to hide origin label etc.
@@ -1302,7 +1331,7 @@ End Sub
 
                   {settings.axisBreakEnabled && (
                     <div className="flex items-center justify-between border-t border-stone-100 pt-2">
-                      <span className="text-[10px] text-stone-500 font-bold uppercase tracking-tighter">Use compression band</span>
+                      <span className="text-[10px] text-stone-500 font-bold uppercase tracking-tighter">Use compression bands</span>
                       <button
                         onClick={() => {
                           const newEqs = settings.equations.map(l => l.id === eq.id ? { ...l, useCompression: !l.useCompression } : l);
@@ -1528,12 +1557,26 @@ End Sub
                 )}
               </div>
 
-              {/* Axis Compression Band */}
+              {/* Axis Compression Bands */}
               <div className="space-y-2 pt-2 border-t">
                 <div className="flex items-center justify-between">
-                  <span className="text-[10px] text-stone-400 uppercase font-bold block">Axis Compression Band</span>
+                  <span className="text-[10px] text-stone-400 uppercase font-bold block">Axis Compression Bands</span>
                   <button
-                    onClick={() => setSettings({ ...settings, axisBreakEnabled: !settings.axisBreakEnabled })}
+                    onClick={() => {
+                      const enabling = !settings.axisBreakEnabled;
+                      const seedBand: AxisBreakBand = {
+                        id: 'band-' + Date.now(),
+                        axis: 'y',
+                        min: '-2',
+                        max: '2',
+                        compression: 0.2,
+                      };
+                      setSettings({
+                        ...settings,
+                        axisBreakEnabled: enabling,
+                        axisBreakBands: enabling && settings.axisBreakBands.length === 0 ? [seedBand] : settings.axisBreakBands,
+                      });
+                    }}
                     className={cn("w-10 h-5 rounded-full transition-colors relative", settings.axisBreakEnabled ? "bg-stone-900" : "bg-stone-200")}
                   >
                     <div className={cn("absolute top-1 w-3 h-3 bg-white rounded-full transition-all", settings.axisBreakEnabled ? "left-6" : "left-1")} />
@@ -1541,47 +1584,96 @@ End Sub
                 </div>
                 {settings.axisBreakEnabled && (
                   <div className="space-y-2 animate-in fade-in slide-in-from-top-2">
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="text-xs text-stone-600 w-12">Axis</span>
-                      <div className="flex bg-stone-50 border border-stone-200 rounded p-0.5 flex-1">
-                        <button
-                          onClick={() => setSettings({ ...settings, axisBreakAxis: 'x' })}
-                          className={cn("flex-1 text-[10px] py-0.5 rounded transition-all", settings.axisBreakAxis === 'x' ? "bg-stone-900 text-white" : "text-stone-500")}
-                        >X</button>
-                        <button
-                          onClick={() => setSettings({ ...settings, axisBreakAxis: 'y' })}
-                          className={cn("flex-1 text-[10px] py-0.5 rounded transition-all", settings.axisBreakAxis === 'y' ? "bg-stone-900 text-white" : "text-stone-500")}
-                        >Y</button>
-                      </div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-[10px] text-stone-500">{settings.axisBreakBands.length} band{settings.axisBreakBands.length === 1 ? '' : 's'}</span>
+                      <button
+                        onClick={() => setSettings({
+                          ...settings,
+                          axisBreakBands: [
+                            ...settings.axisBreakBands,
+                            { id: 'band-' + Date.now(), axis: 'x', min: '-1', max: '1', compression: 0.2 },
+                          ],
+                        })}
+                        className="text-[10px] text-stone-500 hover:text-stone-900 font-bold flex items-center gap-0.5"
+                      >
+                        <Plus size={12} /> Add band
+                      </button>
                     </div>
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="text-xs text-stone-600 w-12">Interval</span>
-                      <input
-                        type="text" value={settings.axisBreakMin}
-                        onChange={(e) => setSettings({ ...settings, axisBreakMin: e.target.value })}
-                        className="w-full bg-stone-50 border border-stone-200 p-1 rounded text-[10px] font-mono"
-                        placeholder="min"
-                      />
-                      <span className="text-stone-300 text-[10px]">to</span>
-                      <input
-                        type="text" value={settings.axisBreakMax}
-                        onChange={(e) => setSettings({ ...settings, axisBreakMax: e.target.value })}
-                        className="w-full bg-stone-50 border border-stone-200 p-1 rounded text-[10px] font-mono"
-                        placeholder="max"
-                      />
-                    </div>
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="text-xs text-stone-600 w-12">Compress</span>
-                      <input
-                        type="range" min="0" max="1" step="0.05"
-                        value={settings.axisBreakCompression}
-                        onChange={(e) => setSettings({ ...settings, axisBreakCompression: Number(e.target.value) })}
-                        className="flex-1 accent-stone-900"
-                      />
-                      <span className="text-[10px] text-stone-500 font-mono w-10 text-right">{settings.axisBreakCompression.toFixed(2)}×</span>
+                    <div className="space-y-2">
+                      {settings.axisBreakBands.map((band, bIdx) => (
+                        <div key={band.id} className="bg-white border border-stone-200 rounded p-2 space-y-1.5 relative group">
+                          <div className="flex items-center justify-between">
+                            <span className="text-[9px] text-stone-400 uppercase font-bold tracking-wider">Band {bIdx + 1}</span>
+                            <button
+                              onClick={() => setSettings({
+                                ...settings,
+                                axisBreakBands: settings.axisBreakBands.filter(b => b.id !== band.id),
+                              })}
+                              className="text-stone-300 hover:text-red-500 transition-colors"
+                              title="Delete band"
+                            >
+                              <Trash2 size={12} />
+                            </button>
+                          </div>
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="text-[10px] text-stone-500 w-10">Axis</span>
+                            <div className="flex bg-stone-50 border border-stone-200 rounded p-0.5 flex-1">
+                              <button
+                                onClick={() => setSettings({
+                                  ...settings,
+                                  axisBreakBands: settings.axisBreakBands.map(b => b.id === band.id ? { ...b, axis: 'x' } : b),
+                                })}
+                                className={cn("flex-1 text-[10px] py-0.5 rounded transition-all", band.axis === 'x' ? "bg-stone-900 text-white" : "text-stone-500")}
+                              >X</button>
+                              <button
+                                onClick={() => setSettings({
+                                  ...settings,
+                                  axisBreakBands: settings.axisBreakBands.map(b => b.id === band.id ? { ...b, axis: 'y' } : b),
+                                })}
+                                className={cn("flex-1 text-[10px] py-0.5 rounded transition-all", band.axis === 'y' ? "bg-stone-900 text-white" : "text-stone-500")}
+                              >Y</button>
+                            </div>
+                          </div>
+                          <div className="flex items-center justify-between gap-1">
+                            <span className="text-[10px] text-stone-500 w-10">Range</span>
+                            <input
+                              type="text" value={band.min}
+                              onChange={(e) => setSettings({
+                                ...settings,
+                                axisBreakBands: settings.axisBreakBands.map(b => b.id === band.id ? { ...b, min: e.target.value } : b),
+                              })}
+                              className="w-full bg-stone-50 border border-stone-200 p-1 rounded text-[10px] font-mono"
+                              placeholder="min"
+                            />
+                            <span className="text-stone-300 text-[9px]">to</span>
+                            <input
+                              type="text" value={band.max}
+                              onChange={(e) => setSettings({
+                                ...settings,
+                                axisBreakBands: settings.axisBreakBands.map(b => b.id === band.id ? { ...b, max: e.target.value } : b),
+                              })}
+                              className="w-full bg-stone-50 border border-stone-200 p-1 rounded text-[10px] font-mono"
+                              placeholder="max"
+                            />
+                          </div>
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="text-[10px] text-stone-500 w-10">Shrink</span>
+                            <input
+                              type="range" min="0" max="1" step="0.01"
+                              value={band.compression}
+                              onChange={(e) => setSettings({
+                                ...settings,
+                                axisBreakBands: settings.axisBreakBands.map(b => b.id === band.id ? { ...b, compression: Number(e.target.value) } : b),
+                              })}
+                              className="flex-1 accent-stone-900"
+                            />
+                            <span className="text-[10px] text-stone-500 font-mono w-9 text-right">{band.compression.toFixed(2)}×</span>
+                          </div>
+                        </div>
+                      ))}
                     </div>
                     <p className="text-[9px] text-stone-400 italic leading-snug">
-                      Shrinks the band's image width to this fraction of the original (0 = collapsed to a line, 1 = unchanged). Transitions stay smooth at the band edges. Only curves with "Use compression band" enabled are affected.
+                      Each band shrinks its data range to that fraction of the original (0 = collapsed to a line, 1 = unchanged). Bands on the same axis should be disjoint. Curves only show compression when "Use compression bands" is enabled on the equation.
                     </p>
                   </div>
                 )}
